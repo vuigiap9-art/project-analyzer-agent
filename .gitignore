@@ -1,0 +1,36 @@
+# === Java / Maven ===
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+*.iml
+
+# === Maven 本地仓库（手动放进项目的） ===
+Eapache-maven-3.9.9maven-repo/
+E\:\\apache-maven-3.9.9\\maven-repo/
+E*apache-maven-3.9.9*maven-repo/
+
+# === Frontend / Node ===
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === 审计产出（可选，按需取消注释） ===
+# Project-Blueprint.md
+
+# === Gemini/Claude ===
+.claude/
+.gemini/

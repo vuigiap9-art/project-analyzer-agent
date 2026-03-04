@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #008075 #121316;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: #121316;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: #008075;
+    border-radius: 3px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: #00b3a0;
+  }
+
+  ::selection {
+    background: rgba(0, 229, 204, 0.25);
+    color: #e0fffe;
+  }
+
+  body {
+    background: #0a0b0d;
+    overflow-x: hidden;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-dark-800/60 backdrop-blur-xl border border-dark-700/50 rounded-xl;
+  }
+
+  .cyber-glow {
+    box-shadow: 0 0 15px rgba(0, 229, 204, 0.15),
+                0 0 30px rgba(0, 229, 204, 0.05),
+                inset 0 1px 0 rgba(0, 229, 204, 0.1);
+  }
+
+  .cyber-border {
+    @apply border border-cyber-700/40;
+  }
+
+  .cyber-input {
+    @apply bg-dark-900/80 border border-dark-600/50 rounded-lg px-4 py-3
+           text-gray-200 font-mono text-sm
+           placeholder:text-dark-400
+           focus:outline-none focus:border-cyber-500/60 focus:ring-1 focus:ring-cyber-500/30
+           transition-all duration-300;
+  }
+
+  .cyber-btn {
+    @apply relative overflow-hidden px-6 py-3 rounded-lg font-mono font-medium text-sm
+           bg-gradient-to-r from-cyber-600 to-cyber-700
+           text-white
+           hover:from-cyber-500 hover:to-cyber-600
+           active:scale-[0.98]
+           transition-all duration-200
+           disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:from-cyber-600 disabled:hover:to-cyber-700 disabled:active:scale-100;
+  }
+
+  .cyber-btn::before {
+    content: '';
+    @apply absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent
+           -translate-x-full;
+    animation: none;
+  }
+
+  .cyber-btn:hover::before {
+    animation: shimmer 1.5s ease-in-out infinite;
+  }
+
+  .tag-chip {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-mono
+           bg-dark-800/80 border border-dark-600/40 text-dark-300
+           hover:border-cyber-600/50 hover:text-cyber-400
+           cursor-pointer transition-all duration-200;
+  }
+
+  .chat-bubble-user {
+    @apply bg-cyber-800/30 border border-cyber-700/30 rounded-2xl rounded-br-md
+           px-4 py-3 text-sm text-gray-200;
+  }
+
+  .chat-bubble-ai {
+    @apply bg-dark-800/50 border border-dark-700/30 rounded-2xl rounded-bl-md
+           px-4 py-3 text-sm text-gray-300;
+  }
+
+  /* Markdown 渲染样式 */
+  .markdown-body {
+    @apply text-gray-300 leading-relaxed;
+  }
+
+  .markdown-body h1 {
+    @apply text-2xl font-bold text-cyber-400 mt-8 mb-4 pb-2 border-b border-dark-700/50;
+  }
+
+  .markdown-body h2 {
+    @apply text-xl font-semibold text-cyber-400/90 mt-6 mb-3;
+  }
+
+  .markdown-body h3 {
+    @apply text-lg font-medium text-gray-200 mt-5 mb-2;
+  }
+
+  .markdown-body p {
+    @apply mb-3 text-sm;
+  }
+
+  .markdown-body ul, .markdown-body ol {
+    @apply mb-3 pl-6 text-sm;
+  }
+
+  .markdown-body li {
+    @apply mb-1;
+  }
+
+  .markdown-body ul li {
+    @apply list-disc;
+  }
+
+  .markdown-body ol li {
+    @apply list-decimal;
+  }
+
+  .markdown-body code {
+    @apply bg-dark-900/80 text-cyber-300 px-1.5 py-0.5 rounded text-xs font-mono;
+  }
+
+  .markdown-body pre {
+    @apply bg-dark-900/90 border border-dark-700/50 rounded-lg p-4 mb-4 overflow-x-auto;
+  }
+
+  .markdown-body pre code {
+    @apply bg-transparent p-0 text-gray-300;
+  }
+
+  .markdown-body table {
+    @apply w-full border-collapse mb-4 text-sm;
+  }
+
+  .markdown-body th {
+    @apply bg-dark-800/80 border border-dark-700/50 px-3 py-2 text-left text-cyber-400 font-medium;
+  }
+
+  .markdown-body td {
+    @apply border border-dark-700/50 px-3 py-2;
+  }
+
+  .markdown-body blockquote {
+    @apply border-l-2 border-cyber-600/50 pl-4 italic text-dark-300 my-3;
+  }
+
+  .markdown-body strong {
+    @apply text-gray-100 font-semibold;
+  }
+
+  .markdown-body a {
+    @apply text-cyber-400 underline underline-offset-2 hover:text-cyber-300 transition-colors;
+  }
+
+  .markdown-body hr {
+    @apply border-dark-700/50 my-6;
+  }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes gradientFlow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+.gradient-flow {
+  background-size: 200% 200%;
+  animation: gradientFlow 3s ease infinite;
+}
