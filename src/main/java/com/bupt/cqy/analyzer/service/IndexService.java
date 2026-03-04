@@ -5,7 +5,6 @@ import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.store.embedding.EmbeddingStore;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -13,7 +12,6 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,24 +25,14 @@ public class IndexService {
     private static final int SMALL_FILE_LINE_THRESHOLD = 100;
 
     private final EmbeddingModel embeddingModel;
-    private final EmbeddingStore<TextSegment> embeddingStore;
-
-    /**
-     * 全量可检索的 segment 列表，供关键字混合检索使用。
-     * 使用 CopyOnWriteArrayList 保证并发安全。
-     */
-    @Getter
-    private final List<TextSegment> allSegments = new CopyOnWriteArrayList<>();
 
     /**
      * 将审计报告和代码片段全部向量化并存入内存向量库。
      * - 报告：按 Markdown 章节（## 标题）切分
      * - 代码：按方法/函数/类级别切分（Java/Python），其他语言整文件入库
      */
-    public void indexAll(String report, List<CodeSnippet> snippets) {
-        log.info("开始向量化索引：报告 + {} 个代码片段", snippets.size());
-        allSegments.clear();
-
+    public List<TextSegment> buildSegments(String report, List<CodeSnippet> snippets) {
+        log.info("开始构建索引段落：报告 + {} 个代码片段", snippets.size());
         List<TextSegment> segments = new ArrayList<>();
 
         // 1. 按 Markdown 二级/三级标题切分审计报告
@@ -75,15 +63,9 @@ public class IndexService {
         }
         log.info("代码片段按结构切分为 {} 个块（来自 {} 个文件）", codeChunkCount, snippets.size());
 
-        // 3. 批量向量化并存入向量库
-        List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
-        embeddingStore.addAll(embeddings, segments);
-
-        // 4. 保存全量 segments 用于关键字检索
-        allSegments.addAll(segments);
-
-        log.info("向量化索引完成：共 {} 个段落（报告 {} + 代码 {}）",
+        log.info("索引段落构建完成：共 {} 个段落（报告 {} + 代码 {}）",
                 segments.size(), reportChunkCount, codeChunkCount);
+        return segments;
     }
 
     /**

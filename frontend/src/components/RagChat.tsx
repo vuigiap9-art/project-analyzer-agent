@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Send, MessageSquare, Loader2, Sparkles, BookOpen } from 'lucide-react'
@@ -21,20 +21,47 @@ const QUICK_QUESTIONS = [
 
 const API_BASE = '/api'
 
-export default function RagChat() {
+export default function RagChat({ projectId }: { projectId: string }) {
     const [messages, setMessages] = useState<Message[]>([])
     const [input, setInput] = useState('')
     const [loading, setLoading] = useState(false)
+    const scrollRef = useRef<HTMLDivElement>(null)
     const bottomRef = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLInputElement>(null)
     const abortRef = useRef<(() => void) | null>(null)
+    const stickToBottomRef = useRef(true)
 
+    const scrollToBottom = (behavior: ScrollBehavior) => {
+        bottomRef.current?.scrollIntoView({ behavior })
+    }
+
+    const onScroll = () => {
+        const el = scrollRef.current
+        if (!el) return
+        const remaining = el.scrollHeight - el.scrollTop - el.clientHeight
+        stickToBottomRef.current = remaining < 120
+    }
+
+    // 初始化时不要自动滚动到底（会把“快捷问题”滚走）
     useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [messages])
+        stickToBottomRef.current = true
+    }, [])
+
+    const sseUrlBase = useMemo(() => {
+        return `${API_BASE}/chat/stream?projectId=${encodeURIComponent(projectId)}`
+    }, [projectId])
 
     const sendMessage = async (question: string) => {
         if (!question.trim() || loading) return
+        if (!projectId) {
+            setMessages(prev => [...prev, {
+                role: 'ai',
+                content: '❌ 缺少 projectId：请先分析项目或从“已索引项目”进入。',
+                timestamp: new Date(),
+                streaming: false,
+            }])
+            return
+        }
 
         const userMsg: Message = { role: 'user', content: question, timestamp: new Date() }
         setMessages(prev => [...prev, userMsg])
@@ -42,7 +69,6 @@ export default function RagChat() {
         setLoading(true)
 
         // 添加一个空的 AI 消息占位符（流式输出用）
-        const aiMsgId = Date.now()
         setMessages(prev => [...prev, {
             role: 'ai',
             content: '',
@@ -52,7 +78,7 @@ export default function RagChat() {
         }])
 
         let stopped = false
-        const url = `${API_BASE}/chat/stream?question=${encodeURIComponent(question)}`
+        const url = `${sseUrlBase}&question=${encodeURIComponent(question)}`
 
         try {
             // 使用 fetch + ReadableStream 读取 SSE（EventSource 不支持自定义错误处理）
@@ -74,30 +100,27 @@ export default function RagChat() {
                 if (done) break
 
                 buffer += decoder.decode(value, { stream: true })
-                const lines = buffer.split('\n')
-                buffer = lines.pop() ?? ''  // 保留不完整的行
 
-                for (const line of lines) {
-                    if (line.startsWith('event:')) continue  // 跳过 event: 行，下面的 data: 处理
+                // 解析完整的 SSE block（以空行分隔，兼容 \n\n 与 \r\n\r\n）
+                while (true) {
+                    const idxLF = buffer.indexOf('\n\n')
+                    const idxCRLF = buffer.indexOf('\r\n\r\n')
+                    const idx = idxLF === -1 ? idxCRLF : (idxCRLF === -1 ? idxLF : Math.min(idxLF, idxCRLF))
+                    if (idx === -1) break
 
-                    // SSE 格式解析："event: xxx\ndata: yyy\n\n"
-                    // Spring SseEmitter 输出格式为：event:name\ndata:value\n\n
-                }
+                    const sepLen = buffer.startsWith('\r\n\r\n', idx) ? 4 : 2
+                    const block = buffer.slice(0, idx)
+                    buffer = buffer.slice(idx + sepLen)
 
-                // 重新解析完整的 SSE 块
-                const fullText = lines.join('\n')
-                const eventBlocks = (buffer + fullText).split('\n\n')
-                buffer = eventBlocks.pop() ?? ''
-
-                for (const block of eventBlocks) {
                     if (!block.trim()) continue
-                    const blockLines = block.split('\n')
+                    const blockLines = block.split(/\r?\n/)
                     let eventName = ''
-                    let eventData = ''
+                    const dataLines: string[] = []
                     for (const bl of blockLines) {
                         if (bl.startsWith('event:')) eventName = bl.slice(6).trim()
-                        else if (bl.startsWith('data:')) eventData = bl.slice(5)
+                        else if (bl.startsWith('data:')) dataLines.push(bl.slice(5).replace(/^ /, ''))
                     }
+                    const eventData = dataLines.join('\n')
 
                     if (eventName === 'sources') {
                         try { currentSources = JSON.parse(eventData) } catch { /* ignore */ }
@@ -114,6 +137,8 @@ export default function RagChat() {
                             if (last.role === 'ai') updated[updated.length - 1] = { ...last, content: last.content + eventData }
                             return updated
                         })
+                        // 仅在用户没主动上滑时跟随到底部
+                        if (stickToBottomRef.current) scrollToBottom('auto')
                     } else if (eventName === 'done') {
                         setMessages(prev => {
                             const updated = [...prev]
@@ -122,10 +147,12 @@ export default function RagChat() {
                             return updated
                         })
                         stopped = true
+                        // 输出结束后再拉回到底部（避免流式过程中打断阅读）
+                        scrollToBottom('smooth')
                     } else if (eventName === 'error') {
                         throw new Error(eventData)
                     }
-                }
+                } // end while parse blocks
             }
         } catch (err: any) {
             if (!stopped) {
@@ -169,7 +196,11 @@ export default function RagChat() {
             </div>
 
             {/* 消息区 */}
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+            <div
+                ref={scrollRef}
+                onScroll={onScroll}
+                className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+            >
                 {messages.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in">
                         <div className="w-16 h-16 rounded-2xl bg-dark-800/60 border border-dark-700/40 flex items-center justify-center mb-5">

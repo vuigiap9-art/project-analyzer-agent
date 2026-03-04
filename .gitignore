@@ -31,6 +31,9 @@ Thumbs.db
 # === 审计产出（可选，按需取消注释） ===
 # Project-Blueprint.md
 
+# === RAG 持久化索引数据（每个项目一份，运行时生成） ===
+data/projects/
+
 # === Gemini/Claude ===
 .claude/
 .gemini/

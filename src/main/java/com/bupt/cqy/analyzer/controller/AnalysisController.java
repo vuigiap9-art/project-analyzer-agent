@@ -1,6 +1,5 @@
 package com.bupt.cqy.analyzer.controller;
 
-import com.bupt.cqy.analyzer.config.VectorStoreConfig;
 import com.bupt.cqy.analyzer.model.ChatRequest;
 import com.bupt.cqy.analyzer.model.ChatResponse;
 import com.bupt.cqy.analyzer.model.CodeSnippet;
@@ -30,13 +29,31 @@ public class AnalysisController {
     private final ProjectSummarizerService projectSummarizerService;
     private final IndexService indexService;
     private final RagChatService ragChatService;
-    private final VectorStoreConfig vectorStoreConfig;
+    private final ProjectIndexManager projectIndexManager;
 
     @GetMapping("/analyze")
-    public ResponseEntity<Map<String, Object>> analyzeProject(@RequestParam String path) {
+    public ResponseEntity<Map<String, Object>> analyzeProject(
+            @RequestParam String path,
+            @RequestParam(defaultValue = "false") boolean force) {
         log.info("Received analysis request for path: {}", path);
 
         try {
+            String projectId = projectIndexManager.projectIdForPath(path);
+
+            // 如果已存在索引且不强制重建，直接复用
+            if (!force && projectIndexManager.isIndexed(projectId)) {
+                ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+                Map<String, Object> response = new HashMap<>();
+                response.put("status", "success");
+                response.put("alreadyIndexed", true);
+                response.put("projectId", projectId);
+                response.put("filesScanned", project.meta().filesScanned());
+                response.put("auditReport", project.blueprint());
+                response.put("blueprint", project.blueprint());
+                response.put("message", "Project already indexed. Loaded from persisted RAG store.");
+                return ResponseEntity.ok(response);
+            }
+
             // Step 1: Scan project
             log.info("Step 1: Scanning project...");
             List<CodeSnippet> snippets = codeCrawlerService.scanProject(path);
@@ -56,15 +73,13 @@ public class AnalysisController {
 
             // Step 4: 向量化索引（RAG 联动）
             log.info("Step 4: Indexing for RAG...");
-            indexService.indexAll(auditReport, snippets);
-
-            // Step 5: 立即持久化向量库，防止重启丢失
-            log.info("Step 5: Persisting vector store...");
-            vectorStoreConfig.persist();
+            ProjectIndexManager.LoadedProject loaded = projectIndexManager.indexAndPersist(path, auditReport, snippets);
 
             // Build response
             Map<String, Object> response = new HashMap<>();
             response.put("status", "success");
+            response.put("alreadyIndexed", false);
+            response.put("projectId", loaded.projectId());
             response.put("filesScanned", snippets.size());
             response.put("auditReport", auditReport);
             response.put("blueprint", auditReport);
@@ -116,7 +131,12 @@ public class AnalysisController {
         log.info("Received chat request: {}", request.getQuestion());
 
         try {
-            RagChatService.ChatResult result = ragChatService.chat(request.getQuestion());
+            String projectId = request.getProjectId();
+            if (projectId == null || projectId.isBlank()) {
+                return ResponseEntity.badRequest()
+                        .body(new ChatResponse("缺少 projectId，请先完成 /api/analyze 或选择已索引项目。", List.of()));
+            }
+            RagChatService.ChatResult result = ragChatService.chat(projectId, request.getQuestion());
             return ResponseEntity.ok(new ChatResponse(result.answer(), result.sources()));
 
         } catch (Exception e) {
@@ -132,9 +152,28 @@ public class AnalysisController {
      * 事件格式：sources → token x N → done
      */
     @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(@RequestParam String question) {
+    public SseEmitter chatStream(@RequestParam String projectId, @RequestParam String question) {
         log.info("Received streaming chat request: {}", question);
-        return ragChatService.chatStream(question);
+        return ragChatService.chatStream(projectId, question);
+    }
+
+    @GetMapping("/projects")
+    public ResponseEntity<List<ProjectIndexManager.ProjectMeta>> listProjects() {
+        return ResponseEntity.ok(projectIndexManager.listProjects());
+    }
+
+    @GetMapping("/projects/{projectId}")
+    public ResponseEntity<Map<String, Object>> getProject(@PathVariable String projectId) {
+        try {
+            ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+            return ResponseEntity.ok(Map.of(
+                    "projectId", project.projectId(),
+                    "meta", project.meta(),
+                    "blueprint", project.blueprint()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
     /**

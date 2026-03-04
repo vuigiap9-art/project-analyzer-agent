@@ -10,7 +10,6 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.output.Response;
 import dev.langchain4j.model.StreamingResponseHandler;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
-import dev.langchain4j.store.embedding.EmbeddingStore;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -40,27 +39,27 @@ public class RagChatService {
             """;
 
     private final EmbeddingModel embeddingModel;
-    private final EmbeddingStore<TextSegment> embeddingStore;
     private final ChatLanguageModel chatModel;
     private final StreamingChatLanguageModel streamingChatModel;
     private final IndexService indexService;
+    private final ProjectIndexManager projectIndexManager;
 
     private final ExecutorService streamExecutor = Executors.newCachedThreadPool();
 
     /**
      * 构建 RAG 增强后的完整 Prompt（供流式和非流式共用）
      */
-    private RagContext buildRagContext(String userQuestion) {
+    private RagContext buildRagContext(ProjectIndexManager.LoadedProject project, String userQuestion) {
         // 1. 向量化用户问题
         Embedding queryEmbedding = embeddingModel.embed(userQuestion).content();
 
         // 2. 向量相似度检索 Top-K
-        List<EmbeddingMatch<TextSegment>> vectorMatches = embeddingStore.findRelevant(queryEmbedding, VECTOR_TOP_K,
+        List<EmbeddingMatch<TextSegment>> vectorMatches = project.store().findRelevant(queryEmbedding, VECTOR_TOP_K,
                 MIN_SCORE);
         log.info("向量检索命中 {} 个片段", vectorMatches.size());
 
         // 3. 关键字检索
-        List<TextSegment> keywordMatches = keywordSearch(userQuestion, KEYWORD_TOP_K);
+        List<TextSegment> keywordMatches = keywordSearch(project, userQuestion, KEYWORD_TOP_K);
         log.info("关键字检索命中 {} 个片段", keywordMatches.size());
 
         // 4. 合并去重（向量结果优先）
@@ -106,13 +105,14 @@ public class RagChatService {
      * 流式 RAG 对话，通过 SSE 逐 token 推送。
      * 格式：先发 `sources` 事件，再逐 token 发 `token` 事件，最后发 `done` 事件。
      */
-    public SseEmitter chatStream(String userQuestion) {
+    public SseEmitter chatStream(String projectId, String userQuestion) {
         SseEmitter emitter = new SseEmitter(300_000L); // 5 分钟超时
 
         streamExecutor.submit(() -> {
             try {
                 log.info("收到流式提问：{}", userQuestion);
-                RagContext ctx = buildRagContext(userQuestion);
+                ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+                RagContext ctx = buildRagContext(project, userQuestion);
 
                 // 先推送来源信息
                 String sourcesJson = ctx.sources().stream()
@@ -166,9 +166,10 @@ public class RagChatService {
     /**
      * 非流式 RAG 对话（保留，供 /api/chat 向后兼容）
      */
-    public ChatResult chat(String userQuestion) {
+    public ChatResult chat(String projectId, String userQuestion) {
         log.info("收到用户提问：{}", userQuestion);
-        RagContext ctx = buildRagContext(userQuestion);
+        ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+        RagContext ctx = buildRagContext(project, userQuestion);
         String answer = chatModel.generate(ctx.prompt());
         log.info("RAG 回答生成完毕，引用 {} 个来源", ctx.sources().size());
         return new ChatResult(answer, ctx.sources());
@@ -177,8 +178,8 @@ public class RagChatService {
     /**
      * 关键字检索：从 IndexService.allSegments 中匹配，路径/类名/方法名权重 ×3
      */
-    List<TextSegment> keywordSearch(String query, int topK) {
-        List<TextSegment> allSegs = indexService.getAllSegments();
+    List<TextSegment> keywordSearch(ProjectIndexManager.LoadedProject project, String query, int topK) {
+        List<TextSegment> allSegs = project.segments();
         if (allSegs.isEmpty())
             return Collections.emptyList();
 

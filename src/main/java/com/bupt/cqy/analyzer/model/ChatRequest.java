@@ -11,4 +11,9 @@ import lombok.Setter;
 @AllArgsConstructor
 public class ChatRequest {
     private String question;
+    /**
+     * 当前会话所属的项目索引 ID（后端按项目隔离向量库）。
+     * 为空时将尝试使用最近一次构建的项目（或返回错误，视接口而定）。
+     */
+    private String projectId;
 }

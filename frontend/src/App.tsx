@@ -3,7 +3,7 @@ import Header from './components/Header'
 import Dashboard from './components/Dashboard'
 import BlueprintViewer from './components/BlueprintViewer'
 import RagChat from './components/RagChat'
-import { analyzeProject, type AnalyzeResponse } from './api'
+import { analyzeProject, getProject, type AnalyzeResponse } from './api'
 
 type AppPhase = 'idle' | 'analyzing' | 'done' | 'error'
 
@@ -14,6 +14,7 @@ export default function App() {
     const [blueprint, setBlueprint] = useState('')
     const [errorMsg, setErrorMsg] = useState('')
     const [filesScanned, setFilesScanned] = useState(0)
+    const [projectId, setProjectId] = useState<string>('')
 
     const handleAnalyze = useCallback(async (path: string) => {
         setPhase('analyzing')
@@ -21,7 +22,7 @@ export default function App() {
         setErrorMsg('')
         setBlueprint('')
 
-        // 模拟进度推进
+        // 延迟启动“假进度条”：如果项目已索引，后端会很快返回，不需要演戏
         const stages = [
             { pct: 10, text: '连接后端服务...' },
             { pct: 25, text: '扫描项目文件...' },
@@ -31,27 +32,60 @@ export default function App() {
             { pct: 85, text: '向量化索引（RAG）...' },
         ]
 
+        let timer: number | null = null
         let stageIndex = 0
-        const timer = setInterval(() => {
-            if (stageIndex < stages.length) {
-                setProgress(stages[stageIndex].pct)
-                setProgressText(stages[stageIndex].text)
-                stageIndex++
-            }
-        }, 2000)
+        const startProgressTimer = () => {
+            if (timer != null) return
+            timer = window.setInterval(() => {
+                if (stageIndex < stages.length) {
+                    setProgress(stages[stageIndex].pct)
+                    setProgressText(stages[stageIndex].text)
+                    stageIndex++
+                }
+            }, 2000)
+        }
+
+        const timerGuard = window.setTimeout(() => startProgressTimer(), 800)
 
         try {
             const data: AnalyzeResponse = await analyzeProject(path)
-            clearInterval(timer)
+            window.clearTimeout(timerGuard)
+            if (timer != null) window.clearInterval(timer)
+
+            const pid = data.projectId || ''
+            setProjectId(pid)
+            if (pid) localStorage.setItem('projectId', pid)
+
             setProgress(100)
-            setProgressText('分析完成 ✓')
+            setProgressText(data.alreadyIndexed ? '已存在索引，加载完成 ✓' : '分析完成 ✓')
             setBlueprint(data.auditReport || data.blueprint || '')
             setFilesScanned(data.filesScanned || 0)
             setTimeout(() => setPhase('done'), 600)
         } catch (err: any) {
-            clearInterval(timer)
+            window.clearTimeout(timerGuard)
+            if (timer != null) window.clearInterval(timer)
             setPhase('error')
             setErrorMsg(err.message || '未知错误')
+        }
+    }, [])
+
+    const handleOpenProject = useCallback(async (pid: string) => {
+        setPhase('analyzing')
+        setProgress(30)
+        setProgressText('加载已索引项目...')
+        setErrorMsg('')
+        try {
+            const detail = await getProject(pid)
+            setProjectId(detail.projectId)
+            localStorage.setItem('projectId', detail.projectId)
+            setBlueprint(detail.blueprint || '')
+            setFilesScanned(detail.meta?.filesScanned || 0)
+            setProgress(100)
+            setProgressText('加载完成 ✓')
+            setTimeout(() => setPhase('done'), 300)
+        } catch (err: any) {
+            setPhase('error')
+            setErrorMsg(err.message || '加载失败')
         }
     }, [])
 
@@ -62,6 +96,7 @@ export default function App() {
         setBlueprint('')
         setErrorMsg('')
         setFilesScanned(0)
+        setProjectId('')
     }, [])
 
     return (
@@ -76,6 +111,7 @@ export default function App() {
                         progressText={progressText}
                         errorMsg={errorMsg}
                         onAnalyze={handleAnalyze}
+                        onOpenProject={handleOpenProject}
                     />
                 )}
 
@@ -90,7 +126,7 @@ export default function App() {
                         </div>
                         {/* 右：RAG 对话 */}
                         <div className="lg:w-1/2 h-1/2 lg:h-full overflow-hidden flex flex-col">
-                            <RagChat />
+                            <RagChat projectId={projectId} />
                         </div>
                     </div>
                 )}

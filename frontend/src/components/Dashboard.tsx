@@ -1,5 +1,6 @@
-import { useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Search, Loader2, AlertTriangle, Folder, FolderOpen, File, ChevronRight, X, FolderSearch, Cpu, Zap } from 'lucide-react'
+import { listProjects, type ProjectMeta } from '../api'
 
 interface DashboardProps {
     phase: 'idle' | 'analyzing' | 'error'
@@ -7,6 +8,7 @@ interface DashboardProps {
     progressText: string
     errorMsg: string
     onAnalyze: (path: string) => void
+    onOpenProject: (projectId: string) => void
 }
 
 interface BrowseEntry {
@@ -23,12 +25,14 @@ interface BrowseResult {
 
 const API_BASE = '/api'
 
-export default function Dashboard({ phase, progress, progressText, errorMsg, onAnalyze }: DashboardProps) {
+export default function Dashboard({ phase, progress, progressText, errorMsg, onAnalyze, onOpenProject }: DashboardProps) {
     const [path, setPath] = useState('/home/cqy/project-analyzer-agent')
     const [showBrowser, setShowBrowser] = useState(false)
     const [browseData, setBrowseData] = useState<BrowseResult | null>(null)
     const [browseLoading, setBrowseLoading] = useState(false)
     const [browseError, setBrowseError] = useState('')
+    const [projects, setProjects] = useState<ProjectMeta[]>([])
+    const [projectsError, setProjectsError] = useState('')
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault()
@@ -61,6 +65,14 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
         setPath(dirPath)
         setShowBrowser(false)
     }
+
+    useEffect(() => {
+        let cancelled = false
+        listProjects()
+            .then((data) => { if (!cancelled) setProjects(data || []) })
+            .catch((e) => { if (!cancelled) setProjectsError(String(e?.message || e)) })
+        return () => { cancelled = true }
+    }, [])
 
     return (
         <div className="flex-1 flex items-center justify-center px-4 py-12">
@@ -168,6 +180,48 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
                             {tag}
                         </span>
                     ))}
+                </div>
+
+                {/* 已索引项目列表 */}
+                <div className="mt-8">
+                    <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs text-dark-400 font-mono">已索引项目</p>
+                        {projects.length > 0 && (
+                            <p className="text-[10px] text-dark-500 font-mono">{projects.length} 个</p>
+                        )}
+                    </div>
+                    {projectsError && (
+                        <div className="text-[11px] text-red-400 font-mono">{projectsError}</div>
+                    )}
+                    {projects.length === 0 && !projectsError && (
+                        <div className="text-[11px] text-dark-600 font-mono">暂无（先分析一次项目即可出现在这里）</div>
+                    )}
+                    {projects.length > 0 && (
+                        <div className="glass-panel p-3 space-y-2">
+                            {projects
+                                .slice()
+                                .sort((a, b) => (b.indexedAt || '').localeCompare(a.indexedAt || ''))
+                                .slice(0, 6)
+                                .map((p) => (
+                                    <div key={p.projectId} className="flex items-center justify-between gap-3">
+                                        <div className="min-w-0">
+                                            <p className="text-xs text-gray-200 font-mono truncate">{p.rootPath}</p>
+                                            <p className="text-[10px] text-dark-500 font-mono truncate">
+                                                {p.projectId} · {p.filesScanned} files · {new Date(p.indexedAt).toLocaleString('zh-CN')}
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            disabled={phase === 'analyzing'}
+                                            onClick={() => onOpenProject(p.projectId)}
+                                            className="cyber-btn text-xs flex-shrink-0 disabled:opacity-40"
+                                        >
+                                            进入
+                                        </button>
+                                    </div>
+                                ))}
+                        </div>
+                    )}
                 </div>
             </div>
 
