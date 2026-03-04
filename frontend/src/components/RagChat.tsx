@@ -137,8 +137,6 @@ export default function RagChat({ projectId }: { projectId: string }) {
                             if (last.role === 'ai') updated[updated.length - 1] = { ...last, content: last.content + eventData }
                             return updated
                         })
-                        // 仅在用户没主动上滑时跟随到底部
-                        if (stickToBottomRef.current) scrollToBottom('auto')
                     } else if (eventName === 'done') {
                         setMessages(prev => {
                             const updated = [...prev]
@@ -231,7 +229,35 @@ export default function RagChat({ projectId }: { projectId: string }) {
                         <div className={`max-w-[85%] ${msg.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'}`}>
                             {msg.role === 'ai' ? (
                                 <div className="markdown-body">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    <ReactMarkdown
+                                        remarkPlugins={[remarkGfm]}
+                                        components={{
+                                            code({ className, children, ...props }) {
+                                                const match = /language-(\w+)/.exec(className || '')
+                                                const lang = match?.[1]
+                                                const codeStr = String(children).replace(/\n$/, '')
+
+                                                if (lang) {
+                                                    return (
+                                                        <div className="relative group">
+                                                            <div className="absolute top-2 right-2 text-[10px] text-dark-500 font-mono uppercase opacity-60">
+                                                                {lang}
+                                                            </div>
+                                                            <code className={className} {...props}>
+                                                                {children}
+                                                            </code>
+                                                        </div>
+                                                    )
+                                                }
+
+                                                return (
+                                                    <code className={className} {...props}>
+                                                        {children}
+                                                    </code>
+                                                )
+                                            },
+                                        }}
+                                    >
                                         {msg.content || (msg.streaming ? '▍' : '')}
                                     </ReactMarkdown>
                                     {/* 流式光标 */}
