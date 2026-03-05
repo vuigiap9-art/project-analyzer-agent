@@ -7,7 +7,7 @@ interface DashboardProps {
     progress: number
     progressText: string
     errorMsg: string
-    onAnalyze: (path: string) => void
+    onAnalyze: (path: string, mode: 'standard' | 'interactive') => void
     onOpenProject: (projectId: string) => void
 }
 
@@ -27,6 +27,7 @@ const API_BASE = '/api'
 
 export default function Dashboard({ phase, progress, progressText, errorMsg, onAnalyze, onOpenProject }: DashboardProps) {
     const [path, setPath] = useState('/home/cqy/project-analyzer-agent')
+    const [mode, setMode] = useState<'standard' | 'interactive'>('standard')
     const [showBrowser, setShowBrowser] = useState(false)
     const [browseData, setBrowseData] = useState<BrowseResult | null>(null)
     const [browseLoading, setBrowseLoading] = useState(false)
@@ -37,7 +38,7 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault()
         if (path.trim() && phase !== 'analyzing') {
-            onAnalyze(path.trim())
+            onAnalyze(path.trim(), mode)
         }
     }
 
@@ -135,6 +136,41 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
                         </button>
                     </div>
                 </form>
+
+                {/* 模式选择：标准审计 / 交互式审计 */}
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                    <div className="inline-flex p-1 rounded-xl bg-dark-900/80 border border-dark-700/70">
+                        <button
+                            type="button"
+                            onClick={() => mode !== 'standard' && setMode('standard')}
+                            className={`px-3 py-1.5 text-[11px] font-mono rounded-lg transition-colors ${
+                                mode === 'standard'
+                                    ? 'bg-cyber-600 text-white'
+                                    : 'text-dark-400 hover:text-gray-100'
+                            }`}
+                            disabled={phase === 'analyzing'}
+                        >
+                            标准审计（含 RAG 索引）
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => mode !== 'interactive' && setMode('interactive')}
+                            className={`ml-1 px-3 py-1.5 text-[11px] font-mono rounded-lg transition-colors whitespace-nowrap ${
+                                mode === 'interactive'
+                                    ? 'bg-cyber-600 text-white'
+                                    : 'text-dark-400 hover:text-gray-100'
+                            }`}
+                            disabled={phase === 'analyzing'}
+                        >
+                            交互式审计（逐步拉取代码）
+                        </button>
+                    </div>
+                    <p className="text-[11px] text-dark-500 font-mono">
+                        {mode === 'standard'
+                            ? '一次性扫描 + 审计 + 构建向量索引，可配合右侧 RAG 问答使用'
+                            : 'DeepSeek 基于 Project-Map 主动点名查看文件，避免上下文爆炸'}
+                    </p>
+                </div>
 
                 {/* 进度条 */}
                 {phase === 'analyzing' && (

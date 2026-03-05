@@ -30,6 +30,7 @@ public class AnalysisController {
     private final IndexService indexService;
     private final RagChatService ragChatService;
     private final ProjectIndexManager projectIndexManager;
+    private final InteractiveAuditService interactiveAuditService;
 
     @GetMapping("/analyze")
     public ResponseEntity<Map<String, Object>> analyzeProject(
@@ -90,6 +91,69 @@ public class AnalysisController {
 
         } catch (Exception e) {
             log.error("Analysis failed for path: {}", path, e);
+            Map<String, Object> errorResponse = new HashMap<>();
+            errorResponse.put("status", "error");
+            errorResponse.put("message", e.getMessage());
+            return ResponseEntity.internalServerError().body(errorResponse);
+        }
+    }
+
+    /**
+     * 交互式审计接口：
+     * - DeepSeek 先基于 Project-Map.json 规划审计路径
+     * - 通过 COMMAND_BLOCK 主动请求查看具体文件
+     * - 后端按需读取源码并多轮喂回，最终生成蓝图
+     */
+    @GetMapping("/analyze/interactive")
+    public ResponseEntity<Map<String, Object>> analyzeProjectInteractive(
+            @RequestParam String path,
+            @RequestParam(defaultValue = "false") boolean force) {
+        log.info("Received interactive analysis request for path: {}", path);
+        try {
+            String projectId = projectIndexManager.projectIdForPath(path);
+
+            if (!force && projectIndexManager.isIndexed(projectId)) {
+                ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+                Map<String, Object> response = new HashMap<>();
+                response.put("status", "success");
+                response.put("mode", "interactive");
+                response.put("alreadyIndexed", true);
+                response.put("projectId", projectId);
+                response.put("filesScanned", project.meta().filesScanned());
+                response.put("auditReport", project.blueprint());
+                response.put("blueprint", project.blueprint());
+                response.put("message", "Project already indexed. Loaded from persisted RAG store.");
+                return ResponseEntity.ok(response);
+            }
+
+            // Step 1: Agentic Interactive Audit (生成高质量蓝图)
+            log.info("Step 1: Starting interactive agent audit...");
+            String auditReport = interactiveAuditService.interactiveAudit(path);
+
+            // Step 2: 把蓝图落盘，方便用户直接在根目录查看
+            log.info("Step 2: Saving project blueprint markdown...");
+            projectSummarizerService.saveBlueprint(auditReport, path);
+
+            // Step 3: 快速获取全量本地文件（纯本地无 LLM 计分消耗），为 RAG 准备弹药
+            log.info("Step 3: Scanning local code files for RAG chunks...");
+            List<CodeSnippet> snippets = codeCrawlerService.scanProject(path);
+
+            // Step 4: 将完美蓝图与全量代码切片编入持久化向量库
+            log.info("Step 4: Indexing blueprint and code segments for RAG...");
+            ProjectIndexManager.LoadedProject loaded = projectIndexManager.indexAndPersist(path, auditReport, snippets);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("status", "success");
+            response.put("mode", "interactive");
+            response.put("alreadyIndexed", false);
+            response.put("projectId", loaded.projectId());
+            response.put("filesScanned", snippets.size());
+            response.put("auditReport", auditReport);
+            response.put("blueprint", auditReport);
+            response.put("message", "Interactive analysis completed and indexed for RAG natively.");
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            log.error("Interactive analysis failed for path: {}", path, e);
             Map<String, Object> errorResponse = new HashMap<>();
             errorResponse.put("status", "error");
             errorResponse.put("message", e.getMessage());
@@ -169,8 +233,7 @@ public class AnalysisController {
             return ResponseEntity.ok(Map.of(
                     "projectId", project.projectId(),
                     "meta", project.meta(),
-                    "blueprint", project.blueprint()
-            ));
+                    "blueprint", project.blueprint()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }

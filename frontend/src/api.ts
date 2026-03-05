@@ -2,10 +2,10 @@ export interface AnalyzeResponse {
     status: string
     projectId?: string
     alreadyIndexed?: boolean
-    filesScanned: number
-    auditReport: string
-    blueprint: string
-    message: string
+    filesScanned?: number
+    auditReport?: string
+    blueprint?: string
+    message?: string
 }
 
 export interface ChatResponse {
@@ -41,6 +41,15 @@ export async function analyzeProject(path: string, opts?: { force?: boolean }): 
         throw new Error(errorData.message || `分析失败 (HTTP ${res.status})`)
     }
     return res.json()
+}
+
+export async function analyzeProjectInteractive(path: string): Promise<AnalyzeResponse> {
+    const res = await fetch(`${API_BASE}/analyze/interactive?path=${encodeURIComponent(path)}`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+        throw new Error(data.message || `交互式分析失败 (HTTP ${res.status})`)
+    }
+    return data
 }
 
 export async function chatWithRAG(question: string): Promise<ChatResponse> {
