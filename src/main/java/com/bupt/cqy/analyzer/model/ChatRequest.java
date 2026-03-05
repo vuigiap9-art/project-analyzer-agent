@@ -16,4 +16,8 @@ public class ChatRequest {
      * 为空时将尝试使用最近一次构建的项目（或返回错误，视接口而定）。
      */
     private String projectId;
+    /**
+     * 对话会话 ID，用于隔离并持久化多轮记忆。
+     */
+    private String sessionId;
 }

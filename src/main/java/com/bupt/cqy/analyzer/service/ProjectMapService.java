@@ -29,16 +29,15 @@ public class ProjectMapService {
             ".py", "Python",
             ".cpp", "C++",
             ".go", "Go",
-            ".js", "JavaScript"
-    );
+            ".js", "JavaScript");
 
     private static final Set<String> IGNORED_DIRS = Set.of(
-            "node_modules", ".git", "target", "bin", "build", ".idea", ".vscode", "dist", "out"
-    );
+            "node_modules", ".git", "target", "bin", "build", ".idea", ".vscode", "dist", "out");
 
     private final ObjectMapper objectMapper;
+    private final ProjectIndexManager projectIndexManager;
 
-    public ProjectMap buildProjectMap(String rootPath) throws IOException {
+    public ProjectMap buildAndPersistProjectMap(String rootPath, String projectId) throws IOException {
         Path root = Path.of(rootPath).toAbsolutePath().normalize();
         if (!Files.exists(root) || !Files.isDirectory(root)) {
             throw new IOException("Path does not exist or is not a directory: " + root);
@@ -69,19 +68,65 @@ public class ProjectMapService {
                 languageStats,
                 files.size(),
                 entryPoints,
-                files
-        );
+                files);
 
-        // 顺便把 Project-Map.json 写到项目根目录，便于调试和人工查看
-        Path jsonPath = root.resolve("Project-Map.json");
+        // 持久化到 data/projects/<projectId>/Project-Map.json
         try {
-            objectMapper.writerWithDefaultPrettyPrinter().writeValue(jsonPath.toFile(), map);
+            projectIndexManager.persistProjectMap(projectId, map);
+            Path jsonPath = projectIndexManager.projectDir(projectId).resolve("Project-Map.json");
             log.info("Project-Map.json saved to {}", jsonPath.toAbsolutePath());
         } catch (Exception e) {
             log.warn("Failed to write Project-Map.json: {}", e.getMessage());
         }
 
         return map;
+    }
+
+    public String toCompactMapJson(ProjectMap map, int maxFilesInPrompt) throws IOException {
+        int limit = Math.max(20, maxFilesInPrompt);
+        List<Map<String, Object>> keyFiles = map.getFiles().stream()
+                .sorted((a, b) -> Integer.compare(scoreFileImportance(b), scoreFileImportance(a)))
+                .limit(limit)
+                .map(file -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("path", file.getPath());
+                    item.put("language", file.getLanguage());
+                    item.put("lineCount", file.getLineCount());
+                    item.put("roles", file.getRoles());
+                    return item;
+                })
+                .toList();
+
+        Map<String, Object> compact = new LinkedHashMap<>();
+        compact.put("projectRoot", map.getProjectRoot());
+        compact.put("languageStats", map.getLanguageStats());
+        compact.put("totalFiles", map.getTotalFiles());
+        compact.put("entryPoints", map.getEntryPoints());
+        compact.put("keyFiles", keyFiles);
+        compact.put("truncated", map.getFiles().size() > keyFiles.size());
+        compact.put("note", "keyFiles 按角色与规模排序，仅用于交互式审计首轮提示；全量 Project-Map 已持久化到 data/projects/{projectId}/Project-Map.json");
+
+        return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(compact);
+    }
+
+    private int scoreFileImportance(ProjectMap.FileInfo file) {
+        int score = 0;
+        List<String> roles = file.getRoles() == null ? List.of() : file.getRoles();
+        if (roles.contains("controller"))
+            score += 80;
+        if (roles.contains("service"))
+            score += 70;
+        if (roles.contains("dao"))
+            score += 60;
+        if (roles.contains("config"))
+            score += 40;
+        if (roles.contains("other"))
+            score += 10;
+        if (file.getLineCount() > 400)
+            score += 20;
+        if (file.getLineCount() > 800)
+            score += 20;
+        return score;
     }
 
     private boolean isSupportedFile(Path path) {
@@ -161,4 +206,3 @@ public class ProjectMapService {
                 || lower.endsWith("main.cpp");
     }
 }
-

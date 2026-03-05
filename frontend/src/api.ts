@@ -52,11 +52,11 @@ export async function analyzeProjectInteractive(path: string): Promise<AnalyzeRe
     return data
 }
 
-export async function chatWithRAG(question: string): Promise<ChatResponse> {
+export async function chatWithRAG(question: string, projectId: string, sessionId?: string): Promise<ChatResponse> {
     const res = await fetch(`${API_BASE}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ question, projectId, sessionId }),
     })
     if (!res.ok) {
         const errorData = await res.json().catch(() => ({}))

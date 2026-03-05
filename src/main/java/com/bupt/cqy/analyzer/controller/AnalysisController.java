@@ -31,6 +31,7 @@ public class AnalysisController {
     private final RagChatService ragChatService;
     private final ProjectIndexManager projectIndexManager;
     private final InteractiveAuditService interactiveAuditService;
+    private final ProjectMapService projectMapService;
 
     @GetMapping("/analyze")
     public ResponseEntity<Map<String, Object>> analyzeProject(
@@ -75,6 +76,10 @@ public class AnalysisController {
             // Step 4: 向量化索引（RAG 联动）
             log.info("Step 4: Indexing for RAG...");
             ProjectIndexManager.LoadedProject loaded = projectIndexManager.indexAndPersist(path, auditReport, snippets);
+
+            // Step 5: 持久化 Project-Map 到 data/projects/<projectId>
+            log.info("Step 5: Persisting Project-Map...");
+            projectMapService.buildAndPersistProjectMap(path, loaded.projectId());
 
             // Build response
             Map<String, Object> response = new HashMap<>();
@@ -128,7 +133,7 @@ public class AnalysisController {
 
             // Step 1: Agentic Interactive Audit (生成高质量蓝图)
             log.info("Step 1: Starting interactive agent audit...");
-            String auditReport = interactiveAuditService.interactiveAudit(path);
+            String auditReport = interactiveAuditService.interactiveAudit(path, projectId);
 
             // Step 2: 把蓝图落盘，方便用户直接在根目录查看
             log.info("Step 2: Saving project blueprint markdown...");
@@ -200,7 +205,7 @@ public class AnalysisController {
                 return ResponseEntity.badRequest()
                         .body(new ChatResponse("缺少 projectId，请先完成 /api/analyze 或选择已索引项目。", List.of()));
             }
-            RagChatService.ChatResult result = ragChatService.chat(projectId, request.getQuestion());
+            RagChatService.ChatResult result = ragChatService.chat(projectId, request.getSessionId(), request.getQuestion());
             return ResponseEntity.ok(new ChatResponse(result.answer(), result.sources()));
 
         } catch (Exception e) {
@@ -216,9 +221,12 @@ public class AnalysisController {
      * 事件格式：sources → token x N → done
      */
     @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(@RequestParam String projectId, @RequestParam String question) {
+    public SseEmitter chatStream(
+            @RequestParam String projectId,
+            @RequestParam(required = false) String sessionId,
+            @RequestParam String question) {
         log.info("Received streaming chat request: {}", question);
-        return ragChatService.chatStream(projectId, question);
+        return ragChatService.chatStream(projectId, sessionId, question);
     }
 
     @GetMapping("/projects")

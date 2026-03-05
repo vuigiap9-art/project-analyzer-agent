@@ -25,6 +25,7 @@ export default function RagChat({ projectId }: { projectId: string }) {
     const [messages, setMessages] = useState<Message[]>([])
     const [input, setInput] = useState('')
     const [loading, setLoading] = useState(false)
+    const [sessionId, setSessionId] = useState('')
     const scrollRef = useRef<HTMLDivElement>(null)
     const bottomRef = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLInputElement>(null)
@@ -47,9 +48,22 @@ export default function RagChat({ projectId }: { projectId: string }) {
         stickToBottomRef.current = true
     }, [])
 
-    const sseUrlBase = useMemo(() => {
-        return `${API_BASE}/chat/stream?projectId=${encodeURIComponent(projectId)}`
+    useEffect(() => {
+        if (!projectId) return
+        const key = `rag-session:${projectId}`
+        const existing = localStorage.getItem(key)
+        if (existing) {
+            setSessionId(existing)
+            return
+        }
+        const newSessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+        localStorage.setItem(key, newSessionId)
+        setSessionId(newSessionId)
     }, [projectId])
+
+    const sseUrlBase = useMemo(() => {
+        return `${API_BASE}/chat/stream?projectId=${encodeURIComponent(projectId)}&sessionId=${encodeURIComponent(sessionId || 'default')}`
+    }, [projectId, sessionId])
 
     const sendMessage = async (question: string) => {
         if (!question.trim() || loading) return

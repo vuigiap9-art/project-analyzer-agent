@@ -16,7 +16,10 @@
   - **交互式模式**：Agent 基于 `Project-Map.json` 主动点名查看关键文件，逐步构建“探查笔记”，再由 Reasoner 提炼成最终蓝图
 - **RAG 知识库与对话**
   - 将蓝图与代码结构化切片后写入向量库
+  - 对话记忆持久化到 `data/projects/{projectId}/chat-memory.json`
+  - 用户提问与 AI 回答会增量向量化写入同项目向量库，可被后续问题召回
   - 支持普通对话接口与 SSE 流式对话接口
+  - 对话阶段可结合 `Project-Map.json` + 工具化文件读取进行补充审计
   - 前端内置 RAG 对话面板，可对指定项目持续提问
 - **Web UI 操作台**
   - 目录浏览器：在服务器文件系统中选择要审计的项目根目录
@@ -63,6 +66,7 @@
   - 第二阶段：Reasoner（`deepSeekChatModel`）基于“探查笔记 + 项目骨架”合成高保真 Blueprint
 - `ProjectMapService` & `ProjectMap`
   - 扫描项目，生成轻量级 `Project-Map.json`（语言统计、入口候选、角色标签等）
+  - 持久化路径：`data/projects/{projectId}/Project-Map.json`
 - `ProjectIndexManager` / `IndexService` / `RagChatService`
   - 将 Blueprint + 代码片段分块、向量化、存储
   - 提供混合检索（向量 + 关键词）与 RAG 对话能力
@@ -104,6 +108,25 @@ $env:DEEPSEEK_API_KEY="你的-deepseek-api-key"
 ```properties
 deepseek.api.key=${DEEPSEEK_API_KEY}
 ```
+
+### RAG 对话降本与超时保护参数（推荐保留默认）
+
+```properties
+rag.chat.vector.top-k=4
+rag.chat.keyword.top-k=2
+rag.chat.min-score=0.35
+rag.chat.max-context-chars=8000
+rag.chat.max-memory-turns=4
+rag.chat.max-memory-context-chars=2500
+rag.chat.enable.agentic.audit=false
+rag.chat.agentic.audit.timeout.ms=8000
+rag.chat.max-agentic-notes.chars=3000
+rag.chat.sse.timeout.ms=600000
+rag.chat.sse.heartbeat.ms=15000
+```
+
+- `rag.chat.enable.agentic.audit=false`：默认关闭每轮问答的额外工具审计，显著降低 token 与首包延迟。
+- `rag.chat.sse.heartbeat.ms=15000`：流式期间每 15 秒发送心跳，减少“前端长时间无响应”与连接超时。
 
 ---
 
@@ -233,6 +256,7 @@ Content-Type: application/json
 
 {
   "projectId": "2025-xxxx",
+  "sessionId": "session-abc",
   "question": "这个项目的整体架构分层是怎样的？"
 }
 ```
@@ -240,7 +264,7 @@ Content-Type: application/json
 - 流式（SSE）：
 
 ```bash
-GET /api/chat/stream?projectId=2025-xxxx&question=...
+GET /api/chat/stream?projectId=2025-xxxx&sessionId=session-abc&question=...
 Accept: text/event-stream
 ```
 
