@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 
 @Slf4j
 @Service
@@ -254,6 +255,82 @@ public class ProjectIndexManager {
                 .toList();
         int fromIndex = Math.max(0, sessionTurns.size() - Math.max(1, limit));
         return sessionTurns.subList(fromIndex, sessionTurns.size());
+    }
+
+    public synchronized int clearChatMemory(String projectId, String sessionId) {
+        try {
+            LoadedProject loaded = load(projectId);
+            String normalizedSessionId = (sessionId == null || sessionId.isBlank()) ? "default" : sessionId;
+
+            List<ChatMemoryTurn> allTurns = readChatMemory(projectId);
+            int before = allTurns.size();
+            List<ChatMemoryTurn> remainTurns = allTurns.stream()
+                    .filter(turn -> !normalizedSessionId.equals(turn.sessionId()))
+                    .toList();
+            int removed = before - remainTurns.size();
+
+            if (removed <= 0) {
+                return 0;
+            }
+
+            writeChatMemory(projectId, remainTurns);
+
+            List<TextSegment> keptSegments = loaded.segments().stream()
+                    .filter(seg -> {
+                        String source = seg.metadata().getString("source");
+                        if (!"chat-memory".equals(source)) {
+                            return true;
+                        }
+                        String segSessionId = seg.metadata().getString("sessionId");
+                        return !normalizedSessionId.equals(segSessionId);
+                    })
+                    .toList();
+
+            InMemoryEmbeddingStore<TextSegment> rebuiltStore = new InMemoryEmbeddingStore<>();
+            if (!keptSegments.isEmpty()) {
+                rebuiltStore.addAll(embeddingModel.embedAll(keptSegments).content(), keptSegments);
+            }
+
+            Path dir = projectDir(projectId);
+            rebuiltStore.serializeToFile(dir.resolve(VECTOR_STORE_FILE));
+            writeSegments(dir.resolve(SEGMENTS_FILE), keptSegments);
+
+            LoadedProject reloaded = new LoadedProject(
+                    loaded.projectId(),
+                    loaded.meta(),
+                    loaded.blueprint(),
+                    rebuiltStore,
+                    new ArrayList<>(keptSegments));
+            cache.put(projectId, reloaded);
+
+            return removed;
+        } catch (Exception e) {
+            throw new RuntimeException("清理对话记忆失败: " + e.getMessage(), e);
+        }
+    }
+
+    public synchronized void deleteProject(String projectId) {
+        try {
+            cache.remove(projectId);
+            Path dir = projectDir(projectId);
+            if (!Files.exists(dir)) {
+                return;
+            }
+            try (Stream<Path> walk = Files.walk(dir)) {
+                walk.sorted(Comparator.reverseOrder())
+                        .forEach(path -> {
+                            try {
+                                Files.deleteIfExists(path);
+                            } catch (Exception ex) {
+                                throw new RuntimeException("删除失败: " + path + " - " + ex.getMessage(), ex);
+                            }
+                        });
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("删除项目失败: " + e.getMessage(), e);
+        }
     }
 
     private void writeChatMemory(String projectId, List<ChatMemoryTurn> turns) throws Exception {

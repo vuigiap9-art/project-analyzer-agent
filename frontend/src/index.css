@@ -147,6 +147,34 @@
     @apply bg-transparent p-0 text-gray-300;
   }
 
+  .markdown-body .hljs-keyword,
+  .markdown-body .hljs-selector-tag,
+  .markdown-body .hljs-literal,
+  .markdown-body .hljs-section,
+  .markdown-body .hljs-link {
+    color: #4dfff6;
+  }
+
+  .markdown-body .hljs-string,
+  .markdown-body .hljs-title,
+  .markdown-body .hljs-name,
+  .markdown-body .hljs-type,
+  .markdown-body .hljs-attribute,
+  .markdown-body .hljs-symbol,
+  .markdown-body .hljs-bullet,
+  .markdown-body .hljs-addition,
+  .markdown-body .hljs-template-tag,
+  .markdown-body .hljs-template-variable {
+    color: #9af7e8;
+  }
+
+  .markdown-body .hljs-comment,
+  .markdown-body .hljs-quote,
+  .markdown-body .hljs-deletion,
+  .markdown-body .hljs-meta {
+    color: #7c8089;
+  }
+
   .markdown-body table {
     @apply w-full border-collapse mb-4 text-sm;
   }
@@ -189,4 +217,8 @@
 .gradient-flow {
   background-size: 200% 200%;
   animation: gradientFlow 3s ease infinite;
+}
+
+.stable-scroll {
+  scrollbar-gutter: stable both-edges;
 }

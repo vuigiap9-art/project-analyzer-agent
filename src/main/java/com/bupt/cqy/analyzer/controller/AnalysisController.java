@@ -3,6 +3,7 @@ package com.bupt.cqy.analyzer.controller;
 import com.bupt.cqy.analyzer.model.ChatRequest;
 import com.bupt.cqy.analyzer.model.ChatResponse;
 import com.bupt.cqy.analyzer.model.CodeSnippet;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.bupt.cqy.analyzer.service.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -13,9 +14,14 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -23,6 +29,9 @@ import java.util.stream.Collectors;
 @RequestMapping("/api")
 @RequiredArgsConstructor
 public class AnalysisController {
+
+    private static final Pattern THINK_BLOCK_PATTERN = Pattern.compile("(?is)<think>(.*?)</think>");
+    private final ExecutorService analysisStreamExecutor = Executors.newCachedThreadPool();
 
     private final CodeCrawlerService codeCrawlerService;
     private final LogicAuditService logicAuditService;
@@ -32,6 +41,7 @@ public class AnalysisController {
     private final ProjectIndexManager projectIndexManager;
     private final InteractiveAuditService interactiveAuditService;
     private final ProjectMapService projectMapService;
+    private final ObjectMapper objectMapper;
 
     @GetMapping("/analyze")
     public ResponseEntity<Map<String, Object>> analyzeProject(
@@ -52,6 +62,8 @@ public class AnalysisController {
                 response.put("filesScanned", project.meta().filesScanned());
                 response.put("auditReport", project.blueprint());
                 response.put("blueprint", project.blueprint());
+                response.put("reasoning", "");
+                response.put("reasonerUsed", false);
                 response.put("message", "Project already indexed. Loaded from persisted RAG store.");
                 return ResponseEntity.ok(response);
             }
@@ -67,7 +79,9 @@ public class AnalysisController {
 
             // Step 2: Perform logic audit
             log.info("Step 2: Performing logic audit...");
-            String auditReport = logicAuditService.auditProject(snippets);
+            String auditReportRaw = logicAuditService.auditProject(snippets);
+            ThinkingExtraction extraction = extractThinking(auditReportRaw);
+            String auditReport = extraction.content().isBlank() ? auditReportRaw : extraction.content();
 
             // Step 3: Save blueprint
             log.info("Step 3: Saving project blueprint...");
@@ -89,6 +103,8 @@ public class AnalysisController {
             response.put("filesScanned", snippets.size());
             response.put("auditReport", auditReport);
             response.put("blueprint", auditReport);
+            response.put("reasoning", extraction.reasoning());
+            response.put("reasonerUsed", !extraction.reasoning().isBlank());
             response.put("message", "Analysis completed successfully. Blueprint saved and indexed for RAG.");
 
             log.info("Analysis completed successfully for path: {}", path);
@@ -112,10 +128,23 @@ public class AnalysisController {
     @GetMapping("/analyze/interactive")
     public ResponseEntity<Map<String, Object>> analyzeProjectInteractive(
             @RequestParam String path,
-            @RequestParam(defaultValue = "false") boolean force) {
+            @RequestParam(defaultValue = "false") boolean force,
+            @RequestParam(required = false) Integer auditMaxCalls,
+            @RequestParam(required = false) Integer auditMaxTotalLines,
+            @RequestParam(required = false) Integer auditMaxLinesPerCall,
+            @RequestParam(required = false) Integer auditTargetLinesPerCall,
+            @RequestParam(required = false) Integer auditMinLinesPerCall,
+            @RequestParam(required = false) Integer auditMaxVisitedFiles) {
         log.info("Received interactive analysis request for path: {}", path);
         try {
             String projectId = projectIndexManager.projectIdForPath(path);
+            InteractiveAuditService.AuditRuntimeOptions runtimeOptions = buildAuditRuntimeOptions(
+                    auditMaxCalls,
+                    auditMaxTotalLines,
+                    auditMaxLinesPerCall,
+                    auditTargetLinesPerCall,
+                    auditMinLinesPerCall,
+                    auditMaxVisitedFiles);
 
             if (!force && projectIndexManager.isIndexed(projectId)) {
                 ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
@@ -127,13 +156,19 @@ public class AnalysisController {
                 response.put("filesScanned", project.meta().filesScanned());
                 response.put("auditReport", project.blueprint());
                 response.put("blueprint", project.blueprint());
+                response.put("reasoning", "");
+                response.put("reasonerUsed", false);
                 response.put("message", "Project already indexed. Loaded from persisted RAG store.");
                 return ResponseEntity.ok(response);
             }
 
             // Step 1: Agentic Interactive Audit (生成高质量蓝图)
             log.info("Step 1: Starting interactive agent audit...");
-            String auditReport = interactiveAuditService.interactiveAudit(path, projectId);
+                InteractiveAuditService.InteractiveAuditResult auditResult = interactiveAuditService.interactiveAuditDetailed(path,
+                    projectId,
+                    null,
+                    runtimeOptions);
+                String auditReport = auditResult.blueprint();
 
             // Step 2: 把蓝图落盘，方便用户直接在根目录查看
             log.info("Step 2: Saving project blueprint markdown...");
@@ -155,6 +190,8 @@ public class AnalysisController {
             response.put("filesScanned", snippets.size());
             response.put("auditReport", auditReport);
             response.put("blueprint", auditReport);
+            response.put("reasoning", auditResult.reasoning());
+            response.put("reasonerUsed", auditResult.reasonerUsed());
             response.put("message", "Interactive analysis completed and indexed for RAG natively.");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
@@ -164,6 +201,50 @@ public class AnalysisController {
             errorResponse.put("message", e.getMessage());
             return ResponseEntity.internalServerError().body(errorResponse);
         }
+    }
+
+    /**
+     * 实时分析进度流（SSE）。
+     * 事件：progress、log、done、error
+     */
+    @GetMapping(value = "/analyze/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter analyzeProjectStream(
+            @RequestParam String path,
+            @RequestParam(defaultValue = "standard") String mode,
+            @RequestParam(defaultValue = "false") boolean force,
+            @RequestParam(required = false) Integer auditMaxCalls,
+            @RequestParam(required = false) Integer auditMaxTotalLines,
+            @RequestParam(required = false) Integer auditMaxLinesPerCall,
+            @RequestParam(required = false) Integer auditTargetLinesPerCall,
+            @RequestParam(required = false) Integer auditMinLinesPerCall,
+            @RequestParam(required = false) Integer auditMaxVisitedFiles) {
+        SseEmitter emitter = new SseEmitter(10 * 60 * 1000L);
+        InteractiveAuditService.AuditRuntimeOptions runtimeOptions = buildAuditRuntimeOptions(
+                auditMaxCalls,
+                auditMaxTotalLines,
+                auditMaxLinesPerCall,
+                auditTargetLinesPerCall,
+                auditMinLinesPerCall,
+                auditMaxVisitedFiles);
+
+        analysisStreamExecutor.submit(() -> {
+            try {
+                sendProgress(emitter, 5, "初始化分析任务...");
+                Map<String, Object> result = "interactive".equalsIgnoreCase(mode)
+                        ? runInteractiveAnalysisWithProgress(path, force, emitter, runtimeOptions)
+                        : runStandardAnalysisWithProgress(path, force, emitter);
+                sendEvent(emitter, "done", result);
+                emitter.complete();
+            } catch (Exception e) {
+                log.error("Streaming analysis failed for path: {}", path, e);
+                try {
+                    sendEvent(emitter, "error", Map.of("message", e.getMessage()));
+                } catch (Exception ignored) {
+                }
+                emitter.completeWithError(e);
+            }
+        });
+        return emitter;
     }
 
     @GetMapping("/health")
@@ -206,7 +287,11 @@ public class AnalysisController {
                         .body(new ChatResponse("缺少 projectId，请先完成 /api/analyze 或选择已索引项目。", List.of()));
             }
             RagChatService.ChatResult result = ragChatService.chat(projectId, request.getSessionId(), request.getQuestion());
-            return ResponseEntity.ok(new ChatResponse(result.answer(), result.sources()));
+                return ResponseEntity.ok(new ChatResponse(
+                    result.answer(),
+                    result.reasoning(),
+                    result.reasonerUsed(),
+                    result.sources()));
 
         } catch (Exception e) {
             log.error("Chat failed", e);
@@ -218,7 +303,7 @@ public class AnalysisController {
     /**
      * 流式 RAG 对话接口（SSE）。
      * 前端通过 EventSource 连接，逐 token 接收流式响应。
-     * 事件格式：sources → token x N → done
+        * 事件格式：sources → (thinking_token|token) x N → thinking_done → done
      */
     @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(
@@ -244,6 +329,63 @@ public class AnalysisController {
                     "blueprint", project.blueprint()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/projects/{projectId}")
+    public ResponseEntity<Map<String, Object>> deleteProject(@PathVariable String projectId) {
+        try {
+            projectIndexManager.deleteProject(projectId);
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "projectId", projectId,
+                    "message", "Project deleted successfully"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/projects/{projectId}/chat-memory")
+    public ResponseEntity<Map<String, Object>> getChatMemory(
+            @PathVariable String projectId,
+            @RequestParam(required = false) String sessionId,
+            @RequestParam(defaultValue = "100") int limit) {
+        try {
+            projectIndexManager.load(projectId);
+            List<ProjectIndexManager.ChatMemoryTurn> turns = projectIndexManager.readRecentChatMemory(
+                    projectId,
+                    sessionId,
+                    Math.max(1, limit));
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "projectId", projectId,
+                    "sessionId", (sessionId == null || sessionId.isBlank()) ? "default" : sessionId,
+                    "turns", turns));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/projects/{projectId}/chat-memory")
+    public ResponseEntity<Map<String, Object>> clearChatMemory(
+            @PathVariable String projectId,
+            @RequestParam(required = false) String sessionId) {
+        try {
+            int removed = projectIndexManager.clearChatMemory(projectId, sessionId);
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "projectId", projectId,
+                    "sessionId", (sessionId == null || sessionId.isBlank()) ? "default" : sessionId,
+                    "removed", removed,
+                    "message", "Chat memory cleared"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()));
         }
     }
 
@@ -289,5 +431,176 @@ public class AnalysisController {
             log.error("Browse failed for path: {}", path, e);
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    private Map<String, Object> runStandardAnalysisWithProgress(String path, boolean force, SseEmitter emitter)
+            throws Exception {
+        sendProgress(emitter, 10, "计算项目标识...");
+        String projectId = projectIndexManager.projectIdForPath(path);
+
+        if (!force && projectIndexManager.isIndexed(projectId)) {
+            sendProgress(emitter, 40, "检测到已索引项目，正在加载缓存...");
+            ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+            sendProgress(emitter, 100, "加载完成 ✓");
+            return Map.of(
+                    "status", "success",
+                    "mode", "standard",
+                    "alreadyIndexed", true,
+                    "projectId", projectId,
+                    "filesScanned", project.meta().filesScanned(),
+                    "auditReport", project.blueprint(),
+                    "blueprint", project.blueprint(),
+                    "reasoning", "",
+                    "reasonerUsed", false,
+                    "message", "Project already indexed. Loaded from persisted RAG store.");
+        }
+
+        sendProgress(emitter, 20, "扫描项目文件...");
+        List<CodeSnippet> snippets = codeCrawlerService.scanProject(path);
+        if (snippets.isEmpty()) {
+            throw new IllegalArgumentException("No supported code files found in the specified path");
+        }
+
+        sendProgress(emitter, 55, "调用模型执行代码审计...");
+        String auditReportRaw = logicAuditService.auditProject(snippets);
+        ThinkingExtraction extraction = extractThinking(auditReportRaw);
+        String auditReport = extraction.content().isBlank() ? auditReportRaw : extraction.content();
+
+        sendProgress(emitter, 70, "保存蓝图文档...");
+        projectSummarizerService.saveBlueprint(auditReport, path);
+
+        sendProgress(emitter, 85, "构建并持久化 RAG 索引...");
+        ProjectIndexManager.LoadedProject loaded = projectIndexManager.indexAndPersist(path, auditReport, snippets);
+
+        sendProgress(emitter, 95, "生成项目地图...");
+        projectMapService.buildAndPersistProjectMap(path, loaded.projectId());
+
+        sendProgress(emitter, 100, "分析完成 ✓");
+        return Map.of(
+                "status", "success",
+                "mode", "standard",
+                "alreadyIndexed", false,
+                "projectId", loaded.projectId(),
+                "filesScanned", snippets.size(),
+                "auditReport", auditReport,
+                "blueprint", auditReport,
+                "reasoning", extraction.reasoning(),
+                "reasonerUsed", !extraction.reasoning().isBlank(),
+                "message", "Analysis completed successfully. Blueprint saved and indexed for RAG.");
+    }
+
+        private Map<String, Object> runInteractiveAnalysisWithProgress(String path, boolean force, SseEmitter emitter,
+            InteractiveAuditService.AuditRuntimeOptions runtimeOptions)
+            throws Exception {
+        sendProgress(emitter, 10, "计算项目标识...");
+        String projectId = projectIndexManager.projectIdForPath(path);
+
+        if (!force && projectIndexManager.isIndexed(projectId)) {
+            sendProgress(emitter, 40, "检测到已索引项目，正在加载缓存...");
+            ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
+            sendProgress(emitter, 100, "加载完成 ✓");
+            return Map.of(
+                    "status", "success",
+                    "mode", "interactive",
+                    "alreadyIndexed", true,
+                    "projectId", projectId,
+                    "filesScanned", project.meta().filesScanned(),
+                    "auditReport", project.blueprint(),
+                    "blueprint", project.blueprint(),
+                    "reasoning", "",
+                    "reasonerUsed", false,
+                    "message", "Project already indexed. Loaded from persisted RAG store.");
+        }
+
+        sendProgress(emitter, 30, "交互式探查核心代码...");
+        InteractiveAuditService.InteractiveAuditResult auditResult = interactiveAuditService.interactiveAuditDetailed(path,
+            projectId,
+                telemetry -> {
+                try {
+                        sendEvent(emitter, "log", telemetry.message());
+                        if (telemetry.calls() != null) {
+                            sendEvent(emitter, "stats", Map.of(
+                                    "calls", telemetry.calls(),
+                                    "maxCalls", telemetry.maxCalls(),
+                                    "visitedFiles", telemetry.visitedFiles(),
+                                "maxVisitedFiles", telemetry.maxVisitedFiles(),
+                                    "totalReadLines", telemetry.totalReadLines(),
+                                    "maxTotalReadLines", telemetry.maxTotalReadLines(),
+                                    "remainingCalls", Math.max(0, telemetry.maxCalls() - telemetry.calls()),
+                                "remainingVisitedFiles", Math.max(0,
+                                    telemetry.maxVisitedFiles() - telemetry.visitedFiles()),
+                                    "remainingLines", Math.max(0, telemetry.maxTotalReadLines() - telemetry.totalReadLines())));
+                        }
+                } catch (Exception ignored) {
+                }
+            }, runtimeOptions);
+        String auditReport = auditResult.blueprint();
+
+        sendProgress(emitter, 55, "保存蓝图文档...");
+        projectSummarizerService.saveBlueprint(auditReport, path);
+
+        sendProgress(emitter, 70, "扫描全量代码用于 RAG...");
+        List<CodeSnippet> snippets = codeCrawlerService.scanProject(path);
+
+        sendProgress(emitter, 85, "构建并持久化 RAG 索引...");
+        ProjectIndexManager.LoadedProject loaded = projectIndexManager.indexAndPersist(path, auditReport, snippets);
+
+        sendProgress(emitter, 100, "交互式分析完成 ✓");
+        return Map.of(
+                "status", "success",
+                "mode", "interactive",
+                "alreadyIndexed", false,
+                "projectId", loaded.projectId(),
+                "filesScanned", snippets.size(),
+                "auditReport", auditReport,
+                "blueprint", auditReport,
+                "reasoning", auditResult.reasoning(),
+                "reasonerUsed", auditResult.reasonerUsed(),
+                "message", "Interactive analysis completed and indexed for RAG natively.");
+    }
+
+    private void sendProgress(SseEmitter emitter, int percent, String text) throws Exception {
+        sendEvent(emitter, "progress", Map.of("percent", percent, "text", text));
+    }
+
+    private void sendEvent(SseEmitter emitter, String event, Object payload) throws Exception {
+        String data = payload instanceof String ? (String) payload : objectMapper.writeValueAsString(payload);
+        emitter.send(SseEmitter.event().name(event).data(data));
+    }
+
+    private InteractiveAuditService.AuditRuntimeOptions buildAuditRuntimeOptions(
+            Integer auditMaxCalls,
+            Integer auditMaxTotalLines,
+            Integer auditMaxLinesPerCall,
+            Integer auditTargetLinesPerCall,
+            Integer auditMinLinesPerCall,
+            Integer auditMaxVisitedFiles) {
+        return new InteractiveAuditService.AuditRuntimeOptions(
+                auditMaxCalls,
+                auditMaxTotalLines,
+                auditMaxLinesPerCall,
+                auditTargetLinesPerCall,
+                auditMinLinesPerCall,
+                auditMaxVisitedFiles);
+    }
+
+    private ThinkingExtraction extractThinking(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return new ThinkingExtraction("", "");
+        }
+        Matcher matcher = THINK_BLOCK_PATTERN.matcher(rawText);
+        List<String> reasoningBlocks = new ArrayList<>();
+        while (matcher.find()) {
+            String block = matcher.group(1);
+            if (block != null && !block.isBlank()) {
+                reasoningBlocks.add(block.trim());
+            }
+        }
+        String content = THINK_BLOCK_PATTERN.matcher(rawText).replaceAll("").trim();
+        String reasoning = String.join("\n\n", reasoningBlocks).trim();
+        return new ThinkingExtraction(content, reasoning);
+    }
+
+    private record ThinkingExtraction(String content, String reasoning) {
     }
 }

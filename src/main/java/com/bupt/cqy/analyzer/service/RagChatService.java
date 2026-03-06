@@ -34,11 +34,15 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 public class RagChatService {
+
+    private static final Pattern THINK_BLOCK_PATTERN = Pattern.compile("(?is)<think>(.*?)</think>");
 
     private static final String SYSTEM_PROMPT = """
             你是一位拥有 20 年经验的资深架构师，正在基于已有的项目审计报告和代码片段回答开发者的问题。
@@ -200,6 +204,8 @@ public class RagChatService {
                 ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
                 RagContext ctx = buildRagContext(project, sessionId, userQuestion);
                 StringBuilder answerBuffer = new StringBuilder();
+                StringBuilder thinkingBuffer = new StringBuilder();
+                StreamThinkSplitter splitter = new StreamThinkSplitter();
 
                 String sourcesJson = ctx.sources().stream()
                         .map(s -> "\"" + s.replace("\"", "\\\"") + "\"")
@@ -210,8 +216,15 @@ public class RagChatService {
                     @Override
                     public void onNext(String token) {
                         try {
-                            answerBuffer.append(token);
-                            emitter.send(SseEmitter.event().name("token").data(token));
+                            StreamThinkSplitter.SplitChunk chunk = splitter.feed(token);
+                            if (!chunk.answer().isEmpty()) {
+                                answerBuffer.append(chunk.answer());
+                                emitter.send(SseEmitter.event().name("token").data(chunk.answer()));
+                            }
+                            if (!chunk.thinking().isEmpty()) {
+                                thinkingBuffer.append(chunk.thinking());
+                                emitter.send(SseEmitter.event().name("thinking_token").data(chunk.thinking()));
+                            }
                         } catch (IOException e) {
                             log.warn("SSE 推送中断: {}", e.getMessage());
                         }
@@ -220,11 +233,26 @@ public class RagChatService {
                     @Override
                     public void onComplete(Response<AiMessage> response) {
                         try {
+                            StreamThinkSplitter.SplitChunk remain = splitter.flush();
+                            if (!remain.answer().isEmpty()) {
+                                answerBuffer.append(remain.answer());
+                                emitter.send(SseEmitter.event().name("token").data(remain.answer()));
+                            }
+                            if (!remain.thinking().isEmpty()) {
+                                thinkingBuffer.append(remain.thinking());
+                                emitter.send(SseEmitter.event().name("thinking_token").data(remain.thinking()));
+                            }
+
                             projectIndexManager.appendChatMemoryAndIndex(
                                     projectId,
                                     ctx.sessionId(),
                                     userQuestion,
                                     answerBuffer.toString());
+                            String thinkingJson = "{\"reasoning\":\""
+                                    + thinkingBuffer.toString().replace("\\", "\\\\").replace("\"", "\\\"")
+                                    .replace("\n", "\\n")
+                                    + "\",\"reasonerUsed\":" + (!thinkingBuffer.toString().isBlank()) + "}";
+                            emitter.send(SseEmitter.event().name("thinking_done").data(thinkingJson));
                                 completed.set(true);
                             emitter.send(SseEmitter.event().name("done").data(""));
                             emitter.complete();
@@ -265,10 +293,12 @@ public class RagChatService {
         log.info("收到用户提问：{}", userQuestion);
         ProjectIndexManager.LoadedProject project = projectIndexManager.load(projectId);
         RagContext ctx = buildRagContext(project, sessionId, userQuestion);
-        String answer = reasonerChatModel.generate(ctx.prompt());
+        String rawAnswer = reasonerChatModel.generate(ctx.prompt());
+        ThinkingExtraction extraction = extractThinking(rawAnswer);
+        String answer = extraction.content().isBlank() ? rawAnswer : extraction.content();
         projectIndexManager.appendChatMemoryAndIndex(projectId, ctx.sessionId(), userQuestion, answer);
         log.info("RAG 回答生成完毕，引用 {} 个来源", ctx.sources().size());
-        return new ChatResult(answer, ctx.sources());
+        return new ChatResult(answer, extraction.reasoning(), !extraction.reasoning().isBlank(), ctx.sources());
     }
 
     private String buildRecentMemoryContext(List<ProjectIndexManager.ChatMemoryTurn> turns) {
@@ -464,7 +494,24 @@ public class RagChatService {
                 .collect(Collectors.joining("\n\n---\n\n"));
     }
 
-    public record ChatResult(String answer, List<String> sources) {
+    private ThinkingExtraction extractThinking(String rawText) {
+        if (rawText == null || rawText.isBlank()) {
+            return new ThinkingExtraction("", "");
+        }
+        Matcher matcher = THINK_BLOCK_PATTERN.matcher(rawText);
+        List<String> reasoningBlocks = new ArrayList<>();
+        while (matcher.find()) {
+            String block = matcher.group(1);
+            if (block != null && !block.isBlank()) {
+                reasoningBlocks.add(block.trim());
+            }
+        }
+        String content = THINK_BLOCK_PATTERN.matcher(rawText).replaceAll("").trim();
+        String reasoning = String.join("\n\n", reasoningBlocks).trim();
+        return new ThinkingExtraction(content, reasoning);
+    }
+
+    public record ChatResult(String answer, String reasoning, boolean reasonerUsed, List<String> sources) {
     }
 
     private record RagContext(String prompt, List<String> sources, String sessionId) {
@@ -527,6 +574,72 @@ public class RagChatService {
             } catch (Exception e) {
                 return "读取文件失败: " + e.getMessage();
             }
+        }
+    }
+
+    private record ThinkingExtraction(String content, String reasoning) {
+    }
+
+    private static final class StreamThinkSplitter {
+        private final StringBuilder buffer = new StringBuilder();
+        private boolean inThinking = false;
+
+        SplitChunk feed(String token) {
+            if (token != null) {
+                buffer.append(token);
+            }
+            return process(false);
+        }
+
+        SplitChunk flush() {
+            return process(true);
+        }
+
+        private SplitChunk process(boolean flushAll) {
+            StringBuilder answerOut = new StringBuilder();
+            StringBuilder thinkingOut = new StringBuilder();
+
+            while (buffer.length() > 0) {
+                if (!inThinking) {
+                    int startIdx = buffer.indexOf("<think>");
+                    if (startIdx == -1) {
+                        int keepTail = flushAll ? 0 : 7;
+                        int safeLen = Math.max(0, buffer.length() - keepTail);
+                        if (safeLen == 0) {
+                            break;
+                        }
+                        answerOut.append(buffer, 0, safeLen);
+                        buffer.delete(0, safeLen);
+                    } else {
+                        if (startIdx > 0) {
+                            answerOut.append(buffer, 0, startIdx);
+                        }
+                        buffer.delete(0, startIdx + "<think>".length());
+                        inThinking = true;
+                    }
+                } else {
+                    int endIdx = buffer.indexOf("</think>");
+                    if (endIdx == -1) {
+                        int keepTail = flushAll ? 0 : 8;
+                        int safeLen = Math.max(0, buffer.length() - keepTail);
+                        if (safeLen == 0) {
+                            break;
+                        }
+                        thinkingOut.append(buffer, 0, safeLen);
+                        buffer.delete(0, safeLen);
+                    } else {
+                        if (endIdx > 0) {
+                            thinkingOut.append(buffer, 0, endIdx);
+                        }
+                        buffer.delete(0, endIdx + "</think>".length());
+                        inThinking = false;
+                    }
+                }
+            }
+            return new SplitChunk(answerOut.toString(), thinkingOut.toString());
+        }
+
+        private record SplitChunk(String answer, String thinking) {
         }
     }
 }

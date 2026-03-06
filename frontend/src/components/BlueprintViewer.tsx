@@ -1,85 +1,35 @@
-import { useEffect, useRef, useState } from 'react'
+import { useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import mermaid from 'mermaid'
-import { FileText, Files } from 'lucide-react'
+import { FileText, Files, ListTree } from 'lucide-react'
+import MermaidBlock from './MermaidBlock'
 
 interface BlueprintViewerProps {
     content: string
     filesScanned: number
+    reasoning?: string
 }
 
-// 初始化 Mermaid（全局只需一次）
-mermaid.initialize({
-    startOnLoad: false,
-    theme: 'dark',
-    themeVariables: {
-        primaryColor: '#008075',
-        primaryTextColor: '#e0fffe',
-        primaryBorderColor: '#00b3a0',
-        lineColor: '#00b3a0',
-        secondaryColor: '#1e1f23',
-        tertiaryColor: '#121316',
-        fontFamily: 'JetBrains Mono, monospace',
-        fontSize: '12px',
-    },
-})
-
-/**
- * 独立的 Mermaid 渲染组件。
- * 关键修复：每个 Mermaid 块作为独立组件，在 useEffect 中直接操作 DOM 渲染 SVG。
- * 避免了原来在父组件 querySelectorAll('.mermaid-pending') 时机不稳定的问题。
- */
-let mermaidCounter = 0
-function MermaidBlock({ code }: { code: string }) {
-    const containerRef = useRef<HTMLDivElement>(null)
-    const [error, setError] = useState<string | null>(null)
-    const idRef = useRef(`mermaid-${++mermaidCounter}`)
-
-    useEffect(() => {
-        const container = containerRef.current
-        if (!container) return
-
-        let cancelled = false
-        mermaid.render(idRef.current, code)
-            .then(({ svg }) => {
-                if (!cancelled && container) {
-                    container.innerHTML = svg
-                    // 让 SVG 自适应宽度
-                    const svgEl = container.querySelector('svg')
-                    if (svgEl) {
-                        svgEl.style.maxWidth = '100%'
-                        svgEl.style.height = 'auto'
-                    }
+export default function BlueprintViewer({ content, filesScanned, reasoning }: BlueprintViewerProps) {
+    const headings = useMemo(() => {
+        return content
+            .split('\n')
+            .filter((line) => /^#{1,3}\s+/.test(line))
+            .map((line, index) => {
+                const level = (line.match(/^#+/)?.[0].length || 1)
+                const text = line.replace(/^#{1,3}\s+/, '').trim()
+                return {
+                    id: `toc-${index}`,
+                    level,
+                    text,
                 }
             })
-            .catch((err) => {
-                if (!cancelled) {
-                    setError(String(err?.message || err))
-                }
-            })
+    }, [content])
 
-        return () => { cancelled = true }
-    }, [code])
-
-    if (error) {
-        return (
-            <div className="my-4 p-3 bg-red-950/30 border border-red-500/30 rounded-lg">
-                <p className="text-red-400 text-xs font-mono">Mermaid 渲染失败</p>
-                <pre className="text-dark-400 text-xs mt-1 overflow-x-auto">{code}</pre>
-            </div>
-        )
+    const jumpToHeading = (target: string) => {
+        const element = document.getElementById(target)
+        if (element) element.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
-
-    return (
-        <div
-            ref={containerRef}
-            className="my-4 p-4 bg-dark-900/60 border border-dark-700/50 rounded-lg overflow-x-auto flex justify-center"
-        />
-    )
-}
-
-export default function BlueprintViewer({ content, filesScanned }: BlueprintViewerProps) {
 
     return (
         <div className="flex flex-col h-full">
@@ -97,46 +47,90 @@ export default function BlueprintViewer({ content, filesScanned }: BlueprintView
             </div>
 
             {/* Markdown 内容 */}
-            <div className="flex-1 overflow-y-auto px-6 py-5">
-                <div className="markdown-body">
-                    <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                            code({ className, children, ...props }) {
-                                const match = /language-(\w+)/.exec(className || '')
-                                const lang = match?.[1]
-                                const codeStr = String(children).replace(/\n$/, '')
+            <div className="flex-1 min-h-0 flex">
+                <aside className="hidden lg:block w-60 border-r border-dark-800/50 px-3 py-4 overflow-y-auto">
+                    <div className="flex items-center gap-2 mb-3 text-xs text-dark-300 font-mono">
+                        <ListTree className="w-3.5 h-3.5" />
+                        文档目录
+                    </div>
+                    <div className="space-y-1">
+                        {headings.length === 0 && <p className="text-[11px] text-dark-500">暂无可导航标题</p>}
+                        {headings.map((item) => (
+                            <button
+                                key={item.id}
+                                onClick={() => jumpToHeading(item.id)}
+                                className="w-full text-left text-[11px] text-dark-300 hover:text-cyber-400 transition-colors truncate"
+                                style={{ paddingLeft: `${(item.level - 1) * 10}px` }}
+                            >
+                                {item.text}
+                            </button>
+                        ))}
+                    </div>
+                </aside>
 
-                                // Mermaid 代码块 → 用独立组件渲染
-                                if (lang === 'mermaid') {
-                                    return <MermaidBlock code={codeStr} />
-                                }
+                <div className="flex-1 overflow-y-auto px-6 py-5">
+                    {reasoning && reasoning.trim().length > 0 && (
+                        <details className="mb-4 p-3 rounded-lg border border-cyber-700/30 bg-cyber-900/20" open>
+                            <summary className="cursor-pointer text-xs font-mono text-cyber-300">Reasoner 思考过程</summary>
+                            <div className="markdown-body mt-3">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {reasoning}
+                                </ReactMarkdown>
+                            </div>
+                        </details>
+                    )}
+                    <div className="markdown-body">
+                        <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                                h1({ children }) {
+                                    const text = String(children)
+                                    const index = headings.findIndex((item) => item.text === text)
+                                    return <h1 id={index >= 0 ? headings[index].id : undefined}>{children}</h1>
+                                },
+                                h2({ children }) {
+                                    const text = String(children)
+                                    const index = headings.findIndex((item) => item.text === text)
+                                    return <h2 id={index >= 0 ? headings[index].id : undefined}>{children}</h2>
+                                },
+                                h3({ children }) {
+                                    const text = String(children)
+                                    const index = headings.findIndex((item) => item.text === text)
+                                    return <h3 id={index >= 0 ? headings[index].id : undefined}>{children}</h3>
+                                },
+                                code({ className, children, ...props }) {
+                                    const match = /language-(\w+)/.exec(className || '')
+                                    const lang = match?.[1]
+                                    const codeStr = String(children).replace(/\n$/, '')
 
-                                // 普通代码块
-                                if (lang) {
-                                    return (
-                                        <div className="relative group">
-                                            <div className="absolute top-2 right-2 text-[10px] text-dark-500 font-mono uppercase opacity-60">
-                                                {lang}
+                                    if (lang === 'mermaid') {
+                                        return <MermaidBlock code={codeStr} />
+                                    }
+
+                                    if (lang) {
+                                        return (
+                                            <div className="relative group">
+                                                <div className="absolute top-2 right-2 text-[10px] text-dark-500 font-mono uppercase opacity-60">
+                                                    {lang}
+                                                </div>
+                                                <code className={className} {...props}>
+                                                    {children}
+                                                </code>
                                             </div>
-                                            <code className={className} {...props}>
-                                                {children}
-                                            </code>
-                                        </div>
-                                    )
-                                }
+                                        )
+                                    }
 
-                                // 行内代码
-                                return (
-                                    <code className={className} {...props}>
-                                        {children}
-                                    </code>
-                                )
-                            },
-                        }}
-                    >
-                        {content}
-                    </ReactMarkdown>
+                                    return (
+                                        <code className={className} {...props}>
+                                            {children}
+                                        </code>
+                                    )
+                                },
+                            }}
+                        >
+                            {content}
+                        </ReactMarkdown>
+                    </div>
                 </div>
             </div>
         </div>

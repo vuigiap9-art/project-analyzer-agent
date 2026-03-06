@@ -1,31 +1,20 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Search, Loader2, AlertTriangle, Folder, FolderOpen, File, ChevronRight, X, FolderSearch, Cpu, Zap } from 'lucide-react'
-import { listProjects, type ProjectMeta } from '../api'
+import { browsePath, deleteProject, listProjects, type ProjectMeta, type BrowseResult, type AnalyzeStreamStats, type AuditTuningOptions } from '../api'
 
 interface DashboardProps {
     phase: 'idle' | 'analyzing' | 'error'
     progress: number
     progressText: string
+    progressLogs: string[]
+    progressStats: AnalyzeStreamStats | null
     errorMsg: string
-    onAnalyze: (path: string, mode: 'standard' | 'interactive') => void
+    onAnalyze: (path: string, mode: 'standard' | 'interactive', tuning?: AuditTuningOptions) => void
     onOpenProject: (projectId: string) => void
+    onProjectDeleted?: (projectId: string) => void
 }
 
-interface BrowseEntry {
-    name: string
-    path: string
-    type: 'dir' | 'file'
-}
-
-interface BrowseResult {
-    current: string
-    parent: string | null
-    entries: BrowseEntry[]
-}
-
-const API_BASE = '/api'
-
-export default function Dashboard({ phase, progress, progressText, errorMsg, onAnalyze, onOpenProject }: DashboardProps) {
+export default function Dashboard({ phase, progress, progressText, progressLogs, progressStats, errorMsg, onAnalyze, onOpenProject, onProjectDeleted }: DashboardProps) {
     const [path, setPath] = useState('/home/cqy/project-analyzer-agent')
     const [mode, setMode] = useState<'standard' | 'interactive'>('standard')
     const [showBrowser, setShowBrowser] = useState(false)
@@ -34,11 +23,27 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
     const [browseError, setBrowseError] = useState('')
     const [projects, setProjects] = useState<ProjectMeta[]>([])
     const [projectsError, setProjectsError] = useState('')
+    const [maxCalls, setMaxCalls] = useState(32)
+    const [maxVisitedFiles, setMaxVisitedFiles] = useState(80)
+    const [maxTotalReadLines, setMaxTotalReadLines] = useState(4800)
+    const [maxLinesPerCall, setMaxLinesPerCall] = useState(200)
+    const [targetLinesPerCall, setTargetLinesPerCall] = useState(150)
+    const [minLinesPerCall, setMinLinesPerCall] = useState(100)
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault()
         if (path.trim() && phase !== 'analyzing') {
-            onAnalyze(path.trim(), mode)
+            const tuning = mode === 'interactive'
+                ? {
+                    maxCalls,
+                    maxVisitedFiles,
+                    maxTotalReadLines,
+                    maxLinesPerCall,
+                    targetLinesPerCall,
+                    minLinesPerCall,
+                }
+                : undefined
+            onAnalyze(path.trim(), mode, tuning)
         }
     }
 
@@ -46,9 +51,7 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
         setBrowseLoading(true)
         setBrowseError('')
         try {
-            const res = await fetch(`${API_BASE}/browse?path=${encodeURIComponent(targetPath)}`)
-            const data = await res.json()
-            if (!res.ok) throw new Error(data.error || '浏览失败')
+            const data = await browsePath(targetPath)
             setBrowseData(data)
         } catch (err: any) {
             setBrowseError(err.message)
@@ -67,6 +70,17 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
         setShowBrowser(false)
     }
 
+    const handleDeleteProject = async (projectId: string) => {
+        if (!window.confirm(`确认删除项目 ${projectId} 的索引与历史记录？`)) return
+        try {
+            await deleteProject(projectId)
+            setProjects((prev) => prev.filter((item) => item.projectId !== projectId))
+            onProjectDeleted?.(projectId)
+        } catch (err: any) {
+            setProjectsError(err?.message || '删除项目失败')
+        }
+    }
+
     useEffect(() => {
         let cancelled = false
         listProjects()
@@ -76,7 +90,7 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
     }, [])
 
     return (
-        <div className="flex-1 flex items-center justify-center px-4 py-12">
+        <div className="flex-1 flex items-center justify-center px-4 py-12 overflow-auto">
             <div className="w-full max-w-2xl animate-fade-in">
                 {/* Hero */}
                 <div className="text-center mb-10">
@@ -172,6 +186,22 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
                     </p>
                 </div>
 
+                {mode === 'interactive' && (
+                    <div className="glass-panel p-3 mb-4 border-dark-700/60">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            <TuningInput label="最大调用" value={maxCalls} onChange={setMaxCalls} disabled={phase === 'analyzing'} min={1} />
+                            <TuningInput label="文件预算" value={maxVisitedFiles} onChange={setMaxVisitedFiles} disabled={phase === 'analyzing'} min={1} />
+                            <TuningInput label="总行预算" value={maxTotalReadLines} onChange={setMaxTotalReadLines} disabled={phase === 'analyzing'} min={200} />
+                            <TuningInput label="单次上限" value={maxLinesPerCall} onChange={setMaxLinesPerCall} disabled={phase === 'analyzing'} min={20} />
+                            <TuningInput label="目标读行" value={targetLinesPerCall} onChange={setTargetLinesPerCall} disabled={phase === 'analyzing'} min={20} />
+                            <TuningInput label="最小读行" value={minLinesPerCall} onChange={setMinLinesPerCall} disabled={phase === 'analyzing'} min={1} />
+                        </div>
+                        <p className="mt-2 text-[10px] text-dark-500 font-mono">
+                            低 token 建议：提高“目标读行”，并降低“最大调用/总行预算”。
+                        </p>
+                    </div>
+                )}
+
                 {/* 进度条 */}
                 {phase === 'analyzing' && (
                     <div className="glass-panel p-5 animate-slide-up">
@@ -192,6 +222,29 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
                             <StageIndicator label="AI 审计" active={progress >= 45} done={progress >= 75} />
                             <StageIndicator label="RAG 索引" active={progress >= 75} done={progress >= 100} />
                         </div>
+
+                        {progressStats && (
+                            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                <StatCard label="调用次数" value={`${progressStats.calls}/${progressStats.maxCalls}`} />
+                                <StatCard label="已读文件" value={`${progressStats.visitedFiles}/${progressStats.maxVisitedFiles}`} />
+                                <StatCard label="剩余调用" value={`${progressStats.remainingCalls}`} />
+                                <StatCard label="剩余文件" value={`${progressStats.remainingVisitedFiles}`} />
+                                <StatCard label="剩余行预算" value={`${progressStats.remainingLines}`} />
+                            </div>
+                        )}
+
+                        {progressLogs.length > 0 && (
+                            <div className="mt-4 rounded-lg border border-dark-700/50 bg-dark-950/70 p-3 max-h-36 overflow-y-auto">
+                                <p className="text-[10px] text-dark-500 font-mono mb-2">analysis.stream.log</p>
+                                <div className="space-y-1">
+                                    {progressLogs.map((log, idx) => (
+                                        <p key={`${idx}-${log}`} className="text-[11px] text-dark-300 font-mono break-all">
+                                            &gt; {log}
+                                        </p>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -253,6 +306,14 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
                                             className="cyber-btn text-xs flex-shrink-0 disabled:opacity-40"
                                         >
                                             进入
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={phase === 'analyzing'}
+                                            onClick={() => handleDeleteProject(p.projectId)}
+                                            className="px-3 py-2 text-xs font-mono rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+                                        >
+                                            删除
                                         </button>
                                     </div>
                                 ))}
@@ -354,6 +415,15 @@ export default function Dashboard({ phase, progress, progressText, errorMsg, onA
     )
 }
 
+function StatCard({ label, value }: { label: string; value: string }) {
+    return (
+        <div className="rounded-lg border border-dark-700/60 bg-dark-900/70 px-3 py-2">
+            <p className="text-[10px] text-dark-500 font-mono">{label}</p>
+            <p className="text-sm text-cyber-300 font-mono mt-1">{value}</p>
+        </div>
+    )
+}
+
 function StageIndicator({ label, active, done }: { label: string; active: boolean; done: boolean }) {
     return (
         <div className="flex items-center gap-1.5">
@@ -363,5 +433,33 @@ function StageIndicator({ label, active, done }: { label: string; active: boolea
                 {label}
             </span>
         </div>
+    )
+}
+
+function TuningInput({
+    label,
+    value,
+    onChange,
+    disabled,
+    min,
+}: {
+    label: string
+    value: number
+    onChange: (value: number) => void
+    disabled: boolean
+    min: number
+}) {
+    return (
+        <label className="rounded-lg border border-dark-700/60 bg-dark-900/70 px-2 py-2">
+            <p className="text-[10px] text-dark-500 font-mono">{label}</p>
+            <input
+                type="number"
+                min={min}
+                value={value}
+                disabled={disabled}
+                onChange={(e) => onChange(Math.max(min, Number(e.target.value) || min))}
+                className="mt-1 w-full bg-transparent outline-none text-sm text-cyber-300 font-mono disabled:opacity-60"
+            />
+        </label>
     )
 }

@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Send, MessageSquare, Loader2, Sparkles, BookOpen } from 'lucide-react'
+import { Send, MessageSquare, Loader2, Sparkles, BookOpen, Trash2 } from 'lucide-react'
+import MermaidBlock from './MermaidBlock'
+import { clearChatMemory, getChatMemory } from '../api'
 
 interface Message {
     role: 'user' | 'ai'
     content: string
+    reasoning?: string
+    reasonerUsed?: boolean
     sources?: string[]
     timestamp: Date
     streaming?: boolean
@@ -31,6 +35,39 @@ export default function RagChat({ projectId }: { projectId: string }) {
     const inputRef = useRef<HTMLInputElement>(null)
     const abortRef = useRef<(() => void) | null>(null)
     const stickToBottomRef = useRef(true)
+    const pendingAnswerRef = useRef('')
+    const pendingThinkingRef = useRef('')
+    const flushRafRef = useRef<number | null>(null)
+
+    const flushPendingToMessage = () => {
+        const appendAnswer = pendingAnswerRef.current
+        const appendThinking = pendingThinkingRef.current
+        if (!appendAnswer && !appendThinking) {
+            flushRafRef.current = null
+            return
+        }
+        pendingAnswerRef.current = ''
+        pendingThinkingRef.current = ''
+        setMessages(prev => {
+            const updated = [...prev]
+            const last = updated[updated.length - 1]
+            if (last?.role === 'ai') {
+                updated[updated.length - 1] = {
+                    ...last,
+                    content: last.content + appendAnswer,
+                    reasonerUsed: last.reasonerUsed || appendThinking.length > 0,
+                    reasoning: (last.reasoning || '') + appendThinking,
+                }
+            }
+            return updated
+        })
+        flushRafRef.current = null
+    }
+
+    const scheduleFlush = () => {
+        if (flushRafRef.current != null) return
+        flushRafRef.current = window.requestAnimationFrame(flushPendingToMessage)
+    }
 
     const scrollToBottom = (behavior: ScrollBehavior) => {
         bottomRef.current?.scrollIntoView({ behavior })
@@ -49,6 +86,14 @@ export default function RagChat({ projectId }: { projectId: string }) {
     }, [])
 
     useEffect(() => {
+        return () => {
+            if (flushRafRef.current != null) {
+                window.cancelAnimationFrame(flushRafRef.current)
+            }
+        }
+    }, [])
+
+    useEffect(() => {
         if (!projectId) return
         const key = `rag-session:${projectId}`
         const existing = localStorage.getItem(key)
@@ -60,6 +105,36 @@ export default function RagChat({ projectId }: { projectId: string }) {
         localStorage.setItem(key, newSessionId)
         setSessionId(newSessionId)
     }, [projectId])
+
+    useEffect(() => {
+        if (!projectId || !sessionId) return
+        let cancelled = false
+        getChatMemory(projectId, sessionId, 200)
+            .then((turns) => {
+                if (cancelled || !turns.length) return
+                const history: Message[] = []
+                for (const turn of turns) {
+                    history.push({
+                        role: 'user',
+                        content: turn.question || '',
+                        timestamp: new Date(turn.timestamp || Date.now()),
+                        streaming: false,
+                    })
+                    history.push({
+                        role: 'ai',
+                        content: turn.answer || '',
+                        timestamp: new Date(turn.timestamp || Date.now()),
+                        streaming: false,
+                    })
+                }
+                setMessages(history)
+            })
+            .catch(() => {
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [projectId, sessionId])
 
     const sseUrlBase = useMemo(() => {
         return `${API_BASE}/chat/stream?projectId=${encodeURIComponent(projectId)}&sessionId=${encodeURIComponent(sessionId || 'default')}`
@@ -132,7 +207,7 @@ export default function RagChat({ projectId }: { projectId: string }) {
                     const dataLines: string[] = []
                     for (const bl of blockLines) {
                         if (bl.startsWith('event:')) eventName = bl.slice(6).trim()
-                        else if (bl.startsWith('data:')) dataLines.push(bl.slice(5).replace(/^ /, ''))
+                        else if (bl.startsWith('data:')) dataLines.push(bl.startsWith('data: ') ? bl.slice(6) : bl.slice(5))
                     }
                     const eventData = dataLines.join('\n')
 
@@ -145,13 +220,30 @@ export default function RagChat({ projectId }: { projectId: string }) {
                             return updated
                         })
                     } else if (eventName === 'token') {
-                        setMessages(prev => {
-                            const updated = [...prev]
-                            const last = updated[updated.length - 1]
-                            if (last.role === 'ai') updated[updated.length - 1] = { ...last, content: last.content + eventData }
-                            return updated
-                        })
+                        pendingAnswerRef.current += eventData
+                        scheduleFlush()
+                    } else if (eventName === 'thinking_token') {
+                        pendingThinkingRef.current += eventData
+                        scheduleFlush()
+                    } else if (eventName === 'thinking_done') {
+                        try {
+                            const payload = JSON.parse(eventData) as { reasoning?: string; reasonerUsed?: boolean }
+                            setMessages(prev => {
+                                const updated = [...prev]
+                                const last = updated[updated.length - 1]
+                                if (last.role === 'ai') {
+                                    updated[updated.length - 1] = {
+                                        ...last,
+                                        reasonerUsed: payload.reasonerUsed || false,
+                                        reasoning: payload.reasoning || last.reasoning || '',
+                                    }
+                                }
+                                return updated
+                            })
+                        } catch {
+                        }
                     } else if (eventName === 'done') {
+                        flushPendingToMessage()
                         setMessages(prev => {
                             const updated = [...prev]
                             const last = updated[updated.length - 1]
@@ -193,6 +285,21 @@ export default function RagChat({ projectId }: { projectId: string }) {
         sendMessage(input)
     }
 
+    const handleClearHistory = async () => {
+        if (!projectId || !sessionId) return
+        if (!window.confirm('确认清空当前会话历史？')) return
+        try {
+            await clearChatMemory(projectId, sessionId)
+            setMessages([])
+        } catch (err: any) {
+            setMessages((prev) => [...prev, {
+                role: 'ai',
+                content: `❌ 清空历史失败: ${err?.message || '未知错误'}`,
+                timestamp: new Date(),
+            }])
+        }
+    }
+
     return (
         <div className="flex flex-col h-full">
             {/* 面板头 */}
@@ -205,13 +312,21 @@ export default function RagChat({ projectId }: { projectId: string }) {
                     <Sparkles className="w-3.5 h-3.5" />
                     <span>Top-5 检索增强 · 流式输出</span>
                 </div>
+                <button
+                    type="button"
+                    onClick={handleClearHistory}
+                    className="ml-3 px-2 py-1 text-[10px] font-mono rounded border border-red-500/40 text-red-300 hover:bg-red-500/10"
+                    title="清空当前会话历史"
+                >
+                    <span className="inline-flex items-center gap-1"><Trash2 className="w-3 h-3" />清空</span>
+                </button>
             </div>
 
             {/* 消息区 */}
             <div
                 ref={scrollRef}
                 onScroll={onScroll}
-                className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+                className="flex-1 overflow-y-auto px-4 py-4 space-y-4 stable-scroll"
             >
                 {messages.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-full text-center animate-fade-in">
@@ -251,6 +366,10 @@ export default function RagChat({ projectId }: { projectId: string }) {
                                                 const lang = match?.[1]
                                                 const codeStr = String(children).replace(/\n$/, '')
 
+                                                if (lang === 'mermaid') {
+                                                    return <MermaidBlock code={codeStr} />
+                                                }
+
                                                 if (lang) {
                                                     return (
                                                         <div className="relative group">
@@ -274,6 +393,18 @@ export default function RagChat({ projectId }: { projectId: string }) {
                                     >
                                         {msg.content || (msg.streaming ? '▍' : '')}
                                     </ReactMarkdown>
+
+                                    {msg.reasonerUsed && msg.reasoning && msg.reasoning.trim().length > 0 && (
+                                        <details className="mt-3 pt-2 border-t border-dark-700/30" open={false}>
+                                            <summary className="cursor-pointer text-[10px] text-cyber-400 font-mono uppercase tracking-wider">思考过程</summary>
+                                            <div className="mt-2 markdown-body">
+                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                    {msg.reasoning}
+                                                </ReactMarkdown>
+                                            </div>
+                                        </details>
+                                    )}
+
                                     {/* 流式光标 */}
                                     {msg.streaming && msg.content && (
                                         <span className="inline-block w-0.5 h-4 bg-cyber-400 animate-pulse ml-0.5 align-middle" />
