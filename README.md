@@ -2,6 +2,7 @@
 
 基于 **Spring Boot + LangChain4j + DeepSeek** 的智能代码审计与架构分析代理，配套 **Vite + React + Tailwind CSS** 前端界面。  
 它可以扫描任意代码仓库，生成高质量的项目蓝图（Markdown格式,本项目的自分析蓝图放在根目录Project-blueprint.md），并构建 RAG 向量索引，支持对项目进行实时问答。
+<img width="2535" height="1261" alt="image" src="https://github.com/user-attachments/assets/52c5d49a-aaac-45a6-8a91-d55548b05115" />
 
 ---
 
@@ -14,6 +15,8 @@
 - **双模式项目审计**
   - **标准模式**：一次性扫描 + 逻辑审计 + 向量化索引
   - **交互式模式**：Agent 基于 `Project-Map.json` 主动点名查看关键文件，逐步构建“探查笔记”，再由 Reasoner 提炼成最终蓝图
+<img width="1023" height="522" alt="image" src="https://github.com/user-attachments/assets/b0d87695-a8bb-4308-85a8-c22a21352c2c" />
+
 - **RAG 知识库与对话**
   - 将蓝图与代码结构化切片后写入向量库
   - 对话记忆持久化到 `data/projects/{projectId}/chat-memory.json`
