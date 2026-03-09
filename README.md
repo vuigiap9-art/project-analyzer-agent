@@ -1,7 +1,7 @@
 # 项目洞察代理（Project Analyzer Agent）
 
 基于 **Spring Boot + LangChain4j + DeepSeek** 的智能代码审计与架构分析代理，配套 **Vite + React + Tailwind CSS** 前端界面。  
-它可以扫描任意代码仓库，生成高质量的项目蓝图（Markdown格式,本项目的自分析蓝图放在根目录Project-blueprint.md），并构建 RAG 向量索引，支持对项目进行实时问答。
+它可以扫描任意代码仓库，生成高质量的项目蓝图（Markdown格式,本项目自分析示例蓝图放在根目录Project-blueprint.md），并构建 RAG 向量索引，支持对项目进行实时问答。
 <img width="2535" height="1261" alt="image" src="https://github.com/user-attachments/assets/52c5d49a-aaac-45a6-8a91-d55548b05115" />
 
 ---
